@@ -3,32 +3,38 @@ import { analyzeStudentVideo, VideoMetadata } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 
-const getString = (value: FormDataEntryValue | null): string | undefined => {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
-};
-
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
-    const videoFile = formData.get("video");
+    const body = await request.json();
 
-    if (!(videoFile instanceof File)) {
-      return NextResponse.json({ error: "Missing video file" }, { status: 400 });
+    const { videoUrl, studentName, bookName, homeworkType, tutorName } =
+      body as {
+      videoUrl?: string;
+      studentName?: string;
+      bookName?: string;
+      homeworkType?: string;
+      tutorName?: string;
+    };
+
+    if (!videoUrl || typeof videoUrl !== "string") {
+      return NextResponse.json({ error: "Missing video URL" }, { status: 400 });
     }
 
     const metadata: VideoMetadata = {
-      studentName: getString(formData.get("studentName")),
-      bookName: getString(formData.get("bookName")),
-      homeworkType: getString(formData.get("homeworkType")),
-      tutorName: getString(formData.get("tutorName")),
+      studentName: studentName?.trim() || undefined,
+      bookName: bookName?.trim() || undefined,
+      homeworkType: homeworkType?.trim() || undefined,
+      tutorName: tutorName?.trim() || undefined,
     };
 
-    const result = await analyzeStudentVideo(videoFile, metadata);
+    const result = await analyzeStudentVideo(videoUrl, metadata);
+
     return NextResponse.json(result);
   } catch (error) {
     console.error("Analyze API error:", error);
-    return NextResponse.json({ error: "Failed to analyze video" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to analyze video" },
+      { status: 500 }
+    );
   }
 }

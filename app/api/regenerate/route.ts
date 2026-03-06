@@ -5,41 +5,57 @@ export const runtime = "nodejs";
 
 type SectionType = "highlights" | "pronunciation" | "grammar";
 
-const getString = (value: FormDataEntryValue | null): string | undefined => {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
-};
-
-const isSectionType = (value: string): value is SectionType => {
-  return value === "highlights" || value === "pronunciation" || value === "grammar";
-};
-
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
-    const videoFile = formData.get("video");
-    const sectionTypeValue = formData.get("sectionType");
+    const body = await request.json();
 
-    if (!(videoFile instanceof File)) {
-      return NextResponse.json({ error: "Missing video file" }, { status: 400 });
+    const {
+      videoUrl,
+      sectionType,
+      studentName,
+      bookName,
+      homeworkType,
+      tutorName,
+    } = body as {
+      videoUrl?: string;
+      sectionType?: string;
+      studentName?: string;
+      bookName?: string;
+      homeworkType?: string;
+      tutorName?: string;
+    };
+
+    if (!videoUrl || typeof videoUrl !== "string") {
+      return NextResponse.json({ error: "Missing video URL" }, { status: 400 });
     }
 
-    if (typeof sectionTypeValue !== "string" || !isSectionType(sectionTypeValue)) {
-      return NextResponse.json({ error: "Invalid sectionType" }, { status: 400 });
+    if (
+      sectionType !== "highlights" &&
+      sectionType !== "pronunciation" &&
+      sectionType !== "grammar"
+    ) {
+      return NextResponse.json({ error: "Invalid section type" }, { status: 400 });
     }
 
     const metadata: VideoMetadata = {
-      studentName: getString(formData.get("studentName")),
-      bookName: getString(formData.get("bookName")),
-      homeworkType: getString(formData.get("homeworkType")),
-      tutorName: getString(formData.get("tutorName")),
+      studentName: studentName?.trim() || undefined,
+      bookName: bookName?.trim() || undefined,
+      homeworkType: homeworkType?.trim() || undefined,
+      tutorName: tutorName?.trim() || undefined,
     };
 
-    const content = await regenerateFeedbackSection(videoFile, sectionTypeValue, metadata);
+    const content = await regenerateFeedbackSection(
+      videoUrl,
+      sectionType as SectionType,
+      metadata
+    );
+
     return NextResponse.json({ content });
   } catch (error) {
     console.error("Regenerate API error:", error);
-    return NextResponse.json({ error: "Failed to regenerate section" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to regenerate feedback section" },
+      { status: 500 }
+    );
   }
 }
