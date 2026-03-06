@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useRef } from 'react';
 import { AppStatus, AnalysisResult } from './types';
 import { analyzeStudentVideo, VideoMetadata } from './services/geminiService';
