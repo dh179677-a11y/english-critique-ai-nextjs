@@ -1,4 +1,4 @@
-import { put } from "@vercel/blob";
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -33,48 +33,39 @@ const assertBlobTokenIsValid = () => {
   }
 };
 
-const getSafeExtension = (contentType: string | null, extHeader: string | null) => {
-  if (extHeader) {
-    const safe = extHeader.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    if (safe) return `.${safe}`;
-  }
-
-  switch (normalizeMimeType(contentType)) {
-    case "video/mp4":
-      return ".mp4";
-    case "video/quicktime":
-      return ".mov";
-    case "video/webm":
-      return ".webm";
-    case "video/x-matroska":
-      return ".mkv";
-    case "video/ogg":
-      return ".ogv";
-    default:
-      return ".mp4";
-  }
+const sanitizePathname = (pathname: string) => {
+  const normalized = pathname.replace(/\\/g, "/").trim();
+  const withoutLeadingSlash = normalized.replace(/^\/+/, "");
+  const safe = withoutLeadingSlash.replace(/[^a-zA-Z0-9/_\-.]/g, "");
+  return safe || `video-${Date.now()}.mp4`;
 };
 
 export async function POST(req: Request) {
   try {
     assertBlobTokenIsValid();
+    const body = (await req.json()) as HandleUploadBody;
 
-    const requestContentType = req.headers.get("content-type");
-    const extHeader = req.headers.get("x-upload-ext");
-    const safeMimeType = normalizeMimeType(requestContentType);
-    const ext = getSafeExtension(safeMimeType, extHeader);
-    const safeFilename = `video-${Date.now()}${ext}`;
+    const jsonResponse = await handleUpload({
+      body,
+      request: req,
+      onBeforeGenerateToken: async (pathname, clientPayload) => {
+        const payload = clientPayload
+          ? (JSON.parse(clientPayload) as { mimeType?: string })
+          : {};
+        const safeMimeType = normalizeMimeType(payload.mimeType || null);
 
-    const arrayBuffer = await req.arrayBuffer();
-    const fileBuffer = Buffer.from(arrayBuffer);
-
-    const blob = await put(safeFilename, fileBuffer, {
-      access: "public",
-      addRandomSuffix: true,
-      contentType: safeMimeType,
+        return {
+          allowedContentTypes: [safeMimeType],
+          addRandomSuffix: true,
+          pathname: sanitizePathname(pathname),
+        };
+      },
+      onUploadCompleted: async () => {
+        // no-op
+      },
     });
 
-    return NextResponse.json({ url: blob.url });
+    return NextResponse.json(jsonResponse);
   } catch (error) {
     console.error("Upload API error:", error);
 

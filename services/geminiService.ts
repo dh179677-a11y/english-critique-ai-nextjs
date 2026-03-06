@@ -1,4 +1,5 @@
 import { AnalysisResult } from "@/types";
+import { upload } from "@vercel/blob/client";
 
 export interface VideoMetadata {
   studentName?: string;
@@ -31,23 +32,15 @@ const getSafeUploadExt = (fileName: string): string => {
 const uploadVideo = async (videoFile: File): Promise<string> => {
   const safeMimeType = getSafeUploadMimeType(videoFile.type);
   const safeExt = getSafeUploadExt(videoFile.name);
+  const pathname = `videos/video-${Date.now()}${safeExt ? `.${safeExt}` : ".mp4"}`;
 
-  const response = await fetch("/api/upload", {
-    method: "POST",
-    headers: {
-      "Content-Type": safeMimeType,
-      ...(safeExt ? { "x-upload-ext": safeExt } : {}),
-    },
-    body: videoFile,
+  const blob = await upload(pathname, videoFile, {
+    access: "public",
+    handleUploadUrl: "/api/upload",
+    clientPayload: JSON.stringify({ mimeType: safeMimeType }),
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Upload failed: ${text}`);
-  }
-
-  const data = (await response.json()) as { url: string };
-  return data.url;
+  return blob.url;
 };
 
 export const analyzeStudentVideo = async (
