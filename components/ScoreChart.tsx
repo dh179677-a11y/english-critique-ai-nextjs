@@ -68,10 +68,13 @@ const ScoreChart: React.FC<ScoreChartProps> = ({ data }) => {
             fillOpacity={0.4}
             isAnimationActive={true}
           />
-          <Tooltip 
-             contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-             formatter={(value: number) => [`${value} / 100`, '得分']}
-          />
+        <Tooltip
+  formatter={(value) => {
+    const v = typeof value === "number" ? value : Number(value);
+    const display = Number.isFinite(v) ? `${v}` : "-";
+  return [display, "得分"] as [string, string];
+  }}
+/>
         </RadarChart>
       </ResponsiveContainer>
     </div>
