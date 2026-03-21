@@ -1,16 +1,20 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import Link from 'next/link';
+import React, { useState, useRef, useEffect } from 'react';
 import { AppStatus, AnalysisResult } from './types';
 import { analyzeStudentVideo, VideoMetadata } from './services/geminiService';
 import ScoreChart from './components/ScoreChart';
 import FeedbackSection from './components/FeedbackSection';
+import { getSessionUser } from './lib/clientAuth';
+import { saveUserRecord } from './lib/clientRecords';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [videoPreview, setVideoPreview] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>('');
+  const [currentUser, setCurrentUser] = useState<string>('');
   
   // Store the actual file for regeneration features
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -22,6 +26,11 @@ const App: React.FC = () => {
   const [tutorName, setTutorName] = useState<string>('');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const user = getSessionUser();
+    if (user) setCurrentUser(user);
+  }, []);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -50,12 +59,19 @@ const App: React.FC = () => {
       };
       
       const analysisData = await analyzeStudentVideo(file, metadata);
-      
+
       // Merge input metadata back into result to ensure consistency even if AI misses it slightly
-      setResult({
+      const finalResult = {
         ...analysisData,
         ...metadata
-      });
+      };
+
+      setResult(finalResult);
+
+      const recordOwner = getSessionUser() || currentUser;
+      if (recordOwner) {
+        saveUserRecord(recordOwner, finalResult);
+      }
       
       setStatus(AppStatus.SUCCESS);
     } catch (error) {
@@ -94,24 +110,34 @@ const App: React.FC = () => {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center space-x-2">
-            <div className="bg-blue-600 text-white p-2 rounded-lg">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-              </svg>
+            <div className="h-10 w-10 rounded-full overflow-hidden shadow-sm">
+              <img
+                src="/pixel-logo.png"
+                alt="EnglishPro logo"
+                className="h-full w-full object-cover"
+              />
             </div>
             <div>
               <h1 className="text-xl font-bold text-gray-900 tracking-tight">EnglishPro Critique AI</h1>
               <p className="text-xs text-gray-500">智能口语测评助手</p>
             </div>
           </div>
-          {status !== AppStatus.IDLE && (
-            <button 
-              onClick={handleReset}
+          <div className="flex items-center gap-4">
+            <Link
+              href="/records"
               className="text-sm text-gray-600 hover:text-blue-600 font-medium transition-colors"
             >
-              上传新视频
-            </button>
-          )}
+              我的测评记录
+            </Link>
+            {status !== AppStatus.IDLE && (
+              <button 
+                onClick={handleReset}
+                className="text-sm text-gray-600 hover:text-blue-600 font-medium transition-colors"
+              >
+                上传新视频
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
