@@ -134,11 +134,112 @@ const downloadVideoInput = async (videoUrl: string) => {
   };
 };
 
+const extractTextFromContentPart = (part: unknown): string => {
+  if (!part || typeof part !== "object") return "";
+
+  const candidate = part as {
+    text?: unknown;
+    value?: unknown;
+    content?: unknown;
+  };
+
+  if (typeof candidate.text === "string") {
+    return candidate.text;
+  }
+
+  if (typeof candidate.value === "string") {
+    return candidate.value;
+  }
+
+  if (typeof candidate.content === "string") {
+    return candidate.content;
+  }
+
+  return "";
+};
+
+const extractTextFromOutput = (response: Record<string, unknown>): string => {
+  const output = response.output;
+
+  if (!Array.isArray(output)) {
+    return "";
+  }
+
+  const texts = output.flatMap((item) => {
+    if (!item || typeof item !== "object") {
+      return [];
+    }
+
+    const content = (item as { content?: unknown }).content;
+
+    if (!Array.isArray(content)) {
+      return [];
+    }
+
+    return content
+      .map(extractTextFromContentPart)
+      .filter((value) => typeof value === "string" && value.trim().length > 0);
+  });
+
+  return texts.join("\n").trim();
+};
+
+const extractTextFromChoices = (response: Record<string, unknown>): string => {
+  const choices = response.choices;
+
+  if (!Array.isArray(choices)) {
+    return "";
+  }
+
+  const texts = choices.flatMap((choice) => {
+    if (!choice || typeof choice !== "object") {
+      return [];
+    }
+
+    const message = (choice as { message?: unknown }).message;
+
+    if (!message || typeof message !== "object") {
+      return [];
+    }
+
+    const content = (message as { content?: unknown }).content;
+
+    if (typeof content === "string") {
+      return [content];
+    }
+
+    if (!Array.isArray(content)) {
+      return [];
+    }
+
+    return content
+      .map(extractTextFromContentPart)
+      .filter((value) => typeof value === "string" && value.trim().length > 0);
+  });
+
+  return texts.join("\n").trim();
+};
+
 const extractResponseText = (
   response: Awaited<ReturnType<OpenAI["responses"]["create"]>>
 ) => {
   if ("output_text" in response && typeof response.output_text === "string") {
     return response.output_text.trim();
+  }
+
+  if (response && typeof response === "object") {
+    const looseResponse = response as unknown as Record<string, unknown>;
+    const outputText = extractTextFromOutput(looseResponse);
+
+    if (outputText) {
+      return outputText;
+    }
+
+    const choiceText = extractTextFromChoices(looseResponse);
+
+    if (choiceText) {
+      return choiceText;
+    }
   }
 
   return "";
@@ -314,6 +415,11 @@ export const analyzeStudentVideo = async (
     const videoInput = await downloadVideoInput(videoUrl);
     const response = await ai.responses.create({
       model: getModel(),
+      text: {
+        format: {
+          type: "json_object",
+        },
+      },
       input: [
         {
           role: "user",
@@ -336,6 +442,7 @@ export const analyzeStudentVideo = async (
     console.log("AI raw response:", resultText);
 
     if (!resultText) {
+      console.error("AI response had no extractable text");
       return safeFallbackResult("AI没有返回内容。");
     }
 
