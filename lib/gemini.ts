@@ -10,6 +10,21 @@ export interface VideoMetadata {
 
 type SectionType = "highlights" | "pronunciation" | "grammar";
 
+const ALLOWED_VIDEO_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-matroska",
+  "video/ogg",
+]);
+
+const ALLOWED_BLOB_HOST_SUFFIXES = [
+  "blob.vercel-storage.com",
+  "public.blob.vercel-storage.com",
+  ".blob.vercel-storage.com",
+  ".public.blob.vercel-storage.com",
+];
+
 const getAiClient = () => {
   const apiKey = process.env.LLM_API_KEY;
   const baseURL = process.env.LLM_BASE_URL;
@@ -30,6 +45,103 @@ const getAiClient = () => {
 
 const getModel = () => {
   return process.env.LLM_MODEL || "gemini-3.1-pro-preview-cli";
+};
+
+const normalizeMimeType = (
+  contentType: string | null | undefined,
+  fallback = "video/mp4"
+): string => {
+  const normalized = contentType?.split(";")[0]?.trim().toLowerCase();
+
+  if (!normalized) {
+    return fallback;
+  }
+
+  return ALLOWED_VIDEO_MIME_TYPES.has(normalized) ? normalized : fallback;
+};
+
+const inferMimeTypeFromPathname = (pathname: string): string => {
+  const normalized = pathname.toLowerCase();
+
+  if (normalized.endsWith(".mp4")) return "video/mp4";
+  if (normalized.endsWith(".mov")) return "video/quicktime";
+  if (normalized.endsWith(".webm")) return "video/webm";
+  if (normalized.endsWith(".mkv")) return "video/x-matroska";
+  if (normalized.endsWith(".ogg")) return "video/ogg";
+
+  return "video/mp4";
+};
+
+const sanitizeFilename = (pathname: string, mimeType: string): string => {
+  const rawName = pathname.split("/").pop()?.trim() || "";
+  const cleaned = rawName.replace(/[^a-zA-Z0-9._-]/g, "");
+
+  if (cleaned) {
+    return cleaned;
+  }
+
+  if (mimeType === "video/quicktime") return `video-${Date.now()}.mov`;
+  if (mimeType === "video/webm") return `video-${Date.now()}.webm`;
+  if (mimeType === "video/x-matroska") return `video-${Date.now()}.mkv`;
+  if (mimeType === "video/ogg") return `video-${Date.now()}.ogg`;
+
+  return `video-${Date.now()}.mp4`;
+};
+
+const assertSupportedVideoUrl = (videoUrl: string): URL => {
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(videoUrl);
+  } catch {
+    throw new Error("videoUrl is invalid");
+  }
+
+  if (parsedUrl.protocol !== "https:") {
+    throw new Error("videoUrl must use https");
+  }
+
+  const isAllowedHost = ALLOWED_BLOB_HOST_SUFFIXES.some((suffix) =>
+    parsedUrl.hostname.endsWith(suffix)
+  );
+
+  if (!isAllowedHost) {
+    throw new Error("videoUrl host is not allowed");
+  }
+
+  return parsedUrl;
+};
+
+const downloadVideoInput = async (videoUrl: string) => {
+  const parsedUrl = assertSupportedVideoUrl(videoUrl);
+  const fallbackMimeType = inferMimeTypeFromPathname(parsedUrl.pathname);
+  const response = await fetch(parsedUrl, { cache: "no-store" });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download video: ${response.status}`);
+  }
+
+  const mimeType = normalizeMimeType(
+    response.headers.get("content-type"),
+    fallbackMimeType
+  );
+  const arrayBuffer = await response.arrayBuffer();
+  const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+  return {
+    filename: sanitizeFilename(parsedUrl.pathname, mimeType),
+    fileData: `data:${mimeType};base64,${base64Data}`,
+  };
+};
+
+const extractResponseText = (
+  response: Awaited<ReturnType<OpenAI["responses"]["create"]>>
+) => {
+  if ("output_text" in response && typeof response.output_text === "string") {
+    return response.output_text.trim();
+  }
+
+  return "";
 };
 
 const extractJson = (rawText: string): string => {
@@ -61,10 +173,7 @@ const safeFallbackResult = (rawText: string): AnalysisResult => {
   };
 };
 
-const buildAnalyzePrompt = (
-  transcript: string,
-  metadata: VideoMetadata
-) => {
+const buildAnalyzePrompt = (metadata: VideoMetadata) => {
   const { studentName, bookName, homeworkType, tutorName } = metadata;
 
   const nameInstruction = studentName
@@ -74,7 +183,7 @@ const buildAnalyzePrompt = (
   return `
 你是一位有20年经验的儿童英语口语测评专家。
 
-请基于下面这段学生英文口语转写文本，进行专业、细致、可执行的点评。
+请直接观看我提供的视频，分析其中学生的英文口语表现，并进行专业、细致、可执行的点评。
 
 【基础信息】
 ${nameInstruction}
@@ -82,11 +191,8 @@ ${nameInstruction}
 作业类型：${homeworkType || "口语练习"}
 辅导老师：${tutorName || "Teacher"}
 
-【学生口语转写文本】
-${transcript}
-
 【任务要求】
-请根据这段英文口语内容，输出以下结构化评分与点评。
+请根据视频中的英文口语表现，输出以下结构化评分与点评。
 
 【严格要求】
 1. 只能返回 JSON
@@ -145,7 +251,6 @@ ${transcript}
 };
 
 const buildRegeneratePrompt = (
-  transcript: string,
   sectionType: SectionType,
   metadata: VideoMetadata
 ) => {
@@ -193,39 +298,41 @@ const buildRegeneratePrompt = (
 绘本：${bookName || "未指定"}
 作业类型：${homeworkType || "口语练习"}
 
-【学生英文口语转写文本】
-${transcript}
-
 ${specificInstruction}
 
-直接输出正文，不要输出JSON，不要加解释。
+请直接观看视频，并只输出该板块正文，不要输出JSON，不要加解释。
 `;
 };
 
 export const analyzeStudentVideo = async (
-  transcript: string,
+  videoUrl: string,
   metadata: VideoMetadata = {}
 ): Promise<AnalysisResult> => {
   try {
     const ai = getAiClient();
-    const prompt = buildAnalyzePrompt(transcript, metadata);
-
-    const response = await ai.chat.completions.create({
+    const prompt = buildAnalyzePrompt(metadata);
+    const videoInput = await downloadVideoInput(videoUrl);
+    const response = await ai.responses.create({
       model: getModel(),
-      temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content: "你是英语口语评分助手，只返回合法 JSON。",
-        },
+      input: [
         {
           role: "user",
-          content: prompt,
+          content: [
+            {
+              type: "input_text",
+              text: prompt,
+            },
+            {
+              type: "input_file",
+              filename: videoInput.filename,
+              file_data: videoInput.fileData,
+            },
+          ],
         },
       ],
     });
 
-    const resultText = response.choices[0]?.message?.content || "";
+    const resultText = extractResponseText(response);
     console.log("AI raw response:", resultText);
 
     if (!resultText) {
@@ -275,30 +382,35 @@ export const analyzeStudentVideo = async (
 };
 
 export const regenerateFeedbackSection = async (
-  transcript: string,
+  videoUrl: string,
   sectionType: SectionType,
   metadata: VideoMetadata
 ): Promise<string> => {
   try {
     const ai = getAiClient();
-    const prompt = buildRegeneratePrompt(transcript, sectionType, metadata);
-
-    const response = await ai.chat.completions.create({
+    const prompt = buildRegeneratePrompt(sectionType, metadata);
+    const videoInput = await downloadVideoInput(videoUrl);
+    const response = await ai.responses.create({
       model: getModel(),
-      temperature: 0.4,
-      messages: [
-        {
-          role: "system",
-          content: "你是英语口语点评助手，只输出正文，不输出JSON。",
-        },
+      input: [
         {
           role: "user",
-          content: prompt,
+          content: [
+            {
+              type: "input_text",
+              text: prompt,
+            },
+            {
+              type: "input_file",
+              filename: videoInput.filename,
+              file_data: videoInput.fileData,
+            },
+          ],
         },
       ],
     });
 
-    return response.choices[0]?.message?.content?.trim() || "";
+    return extractResponseText(response);
   } catch (error) {
     console.error("LLM regenerate error:", error);
     return "AI暂时无法重新生成该部分内容，请稍后重试。";

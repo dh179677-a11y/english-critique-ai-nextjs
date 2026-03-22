@@ -18,7 +18,7 @@ export async function POST(request: Request) {
       tutorName,
     } = body as {
       videoUrl?: string;
-      sectionType?: string;
+      sectionType?: SectionType;
       studentName?: string;
       bookName?: string;
       homeworkType?: string;
@@ -26,15 +26,20 @@ export async function POST(request: Request) {
     };
 
     if (!videoUrl || typeof videoUrl !== "string") {
-      return NextResponse.json({ error: "Missing video URL" }, { status: 400 });
+      return NextResponse.json(
+        { error: "videoUrl is required" },
+        { status: 400 }
+      );
     }
 
     if (
-      sectionType !== "highlights" &&
-      sectionType !== "pronunciation" &&
-      sectionType !== "grammar"
+      !sectionType ||
+      !["highlights", "pronunciation", "grammar"].includes(sectionType)
     ) {
-      return NextResponse.json({ error: "Invalid section type" }, { status: 400 });
+      return NextResponse.json(
+        { error: "invalid sectionType" },
+        { status: 400 }
+      );
     }
 
     const metadata: VideoMetadata = {
@@ -44,18 +49,15 @@ export async function POST(request: Request) {
       tutorName: tutorName?.trim() || undefined,
     };
 
-    const content = await regenerateFeedbackSection(
+    const result = await regenerateFeedbackSection(
       videoUrl,
-      sectionType as SectionType,
+      sectionType,
       metadata
     );
 
-    return NextResponse.json({ content });
+    return NextResponse.json({ content: result });
   } catch (error) {
-    console.error("Regenerate API error:", error);
-    return NextResponse.json(
-      { error: "Failed to regenerate feedback section" },
-      { status: 500 }
-    );
+    console.error("Regenerate route error:", error);
+    return NextResponse.json({ error: "重写失败" }, { status: 500 });
   }
 }
