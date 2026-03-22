@@ -7,34 +7,34 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    const { videoUrl, studentName, bookName, homeworkType, tutorName } =
+    const { transcript, studentName, bookName, homeworkType, tutorName } =
       body as {
-      videoUrl?: string;
-      studentName?: string;
-      bookName?: string;
-      homeworkType?: string;
-      tutorName?: string;
-    };
+        transcript?: string;
+        studentName?: string;
+        bookName?: string;
+        homeworkType?: string;
+        tutorName?: string;
+      };
 
-    if (!videoUrl || typeof videoUrl !== "string") {
-      return NextResponse.json({ error: "Missing video URL" }, { status: 400 });
+    if (!transcript || typeof transcript !== "string") {
+      return NextResponse.json(
+        { error: "transcript is required" },
+        { status: 400 }
+      );
     }
 
     const metadata: VideoMetadata = {
-      studentName: studentName?.trim() || undefined,
-      bookName: bookName?.trim() || undefined,
-      homeworkType: homeworkType?.trim() || undefined,
-      tutorName: tutorName?.trim() || undefined,
+      studentName,
+      bookName,
+      homeworkType,
+      tutorName,
     };
 
-    const result = await analyzeStudentVideo(videoUrl, metadata);
+    const result = await analyzeStudentVideo(transcript, metadata);
 
     return NextResponse.json(result);
   } catch (error) {
-    console.error("Analyze API error:", error);
-    return NextResponse.json(
-      { error: "Failed to analyze video" },
-      { status: 500 }
-    );
+    console.error("Analyze route error:", error);
+    return NextResponse.json({ error: "分析失败" }, { status: 500 });
   }
 }

@@ -1,4 +1,4 @@
-import { GoogleGenAI, Schema, Type } from "@google/genai";
+import OpenAI from "openai";
 import { AnalysisResult } from "@/types";
 
 export interface VideoMetadata {
@@ -8,257 +8,44 @@ export interface VideoMetadata {
   tutorName?: string;
 }
 
+type SectionType = "highlights" | "pronunciation" | "grammar";
+
 const getAiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.LLM_API_KEY;
+  const baseURL = process.env.LLM_BASE_URL;
+
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured on server");
-  }
-  return new GoogleGenAI({ apiKey });
-};
-
-const ALLOWED_VIDEO_MIME_TYPES = new Set([
-  "video/mp4",
-  "video/quicktime",
-  "video/webm",
-  "video/x-matroska",
-  "video/ogg",
-]);
-
-const getSafeVideoMimeType = (contentType: string | null): string => {
-  if (!contentType) return "video/mp4";
-  const normalized = contentType.split(";")[0]?.trim().toLowerCase();
-  if (!normalized) return "video/mp4";
-  return ALLOWED_VIDEO_MIME_TYPES.has(normalized) ? normalized : "video/mp4";
-};
-
-const fetchVideoAsBase64 = async (
-  videoUrl: string,
-): Promise<{ base64Video: string; mimeType: string }> => {
-  console.log("Fetching video from URL:", videoUrl);
-
-  const response = await fetch(videoUrl);
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch video from URL: ${response.status}`);
+    throw new Error("LLM_API_KEY is not configured on server");
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  const base64Video = buffer.toString("base64");
-  const mimeType = getSafeVideoMimeType(response.headers.get("content-type"));
+  if (!baseURL) {
+    throw new Error("LLM_BASE_URL is not configured on server");
+  }
 
-  console.log("Fetched video:", {
-    mimeType,
-    sizeBytes: buffer.length,
-    base64Length: base64Video.length,
+  return new OpenAI({
+    apiKey,
+    baseURL,
   });
-
-  return { base64Video, mimeType };
 };
 
-const responseSchema: Schema = {
-  type: Type.OBJECT,
-  properties: {
-    fluency: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.NUMBER, description: "Score out of 100" },
-        comment: {
-          type: Type.STRING,
-          description: "Brief summary of fluency IN CHINESE (中文), no asterisks",
-        },
-      },
-      required: ["score", "comment"],
-    },
-    pronunciation: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.NUMBER, description: "Score out of 100" },
-        comment: {
-          type: Type.STRING,
-          description:
-            "Brief summary of pronunciation IN CHINESE (中文), no asterisks",
-        },
-      },
-      required: ["score", "comment"],
-    },
-    intonation: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.NUMBER, description: "Score out of 100" },
-        comment: {
-          type: Type.STRING,
-          description: "Brief summary of intonation IN CHINESE (中文), no asterisks",
-        },
-      },
-      required: ["score", "comment"],
-    },
-    vocabulary: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.NUMBER, description: "Score out of 100" },
-        comment: {
-          type: Type.STRING,
-          description:
-            "Brief summary of vocabulary usage IN CHINESE (中文), no asterisks",
-        },
-      },
-      required: ["score", "comment"],
-    },
-    emotion: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.NUMBER, description: "Score out of 100" },
-        comment: {
-          type: Type.STRING,
-          description:
-            "Brief summary of emotional engagement IN CHINESE (中文), no asterisks",
-        },
-      },
-      required: ["score", "comment"],
-    },
-    overallComment: {
-      type: Type.STRING,
-      description:
-        "The detailed expert report following the structure. Ensure text is segmented into paragraphs. No asterisks.",
-    },
-    suggestions: {
-      type: Type.ARRAY,
-      items: { type: Type.STRING },
-      description:
-        "List of 3 specific actionable suggestions IN CHINESE. No asterisks.",
-    },
-    grammarSummary: {
-      type: Type.STRING,
-      description:
-        "A specific educational section summarizing key grammar points in CHINESE. No asterisks.",
-    },
-  },
-  required: [
-    "fluency",
-    "pronunciation",
-    "intonation",
-    "vocabulary",
-    "emotion",
-    "overallComment",
-    "suggestions",
-    "grammarSummary",
-  ],
+const getModel = () => {
+  return process.env.LLM_MODEL || "gemini-3.1-pro-preview-cli";
 };
 
-const buildAnalyzePrompt = (metadata: VideoMetadata) => {
-  const { studentName, bookName, homeworkType, tutorName } = metadata;
+const extractJson = (rawText: string): string => {
+  const cleaned = rawText
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
 
-  const nameInstruction = studentName
-    ? `Student Name: "${studentName}". Use this name naturally in the evaluation.`
-    : "Address the student as '宝贝' or '同学'.";
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
 
-  return `
-Role: You are a senior ESL (English as a Second Language) expert teacher specializing in children's English education with 20 years of experience. You have a keen ear for phonetics, a structured pedagogical approach, and you empower parents to coach their children.
-
-Context Information:
-${nameInstruction}
-Book Name: ${bookName || "未指定"}
-Homework Type: ${homeworkType || "口语练习"}
-Tutor Name: ${tutorName || "Teacher"}
-
-Task: Analyze the attached video of a student speaking English. Provide a highly detailed, constructive, and actionable critique.
-
-CRITICAL OUTPUT FORMAT:
-1. Language: ALL comments MUST BE IN CHINESE (Simplified).
-2. Return STRICT JSON only.
-3. Do NOT wrap JSON in markdown code fences.
-4. Do NOT add any explanatory text before or after the JSON.
-5. Do NOT use asterisks (*) or markdown bolding (**).
-
-Structure for 'overallComment':
-
-1. 作业亮点
-   (Identify at least 3 specific strengths. Include specific examples.)
-
-2. 发音评测
-   (Identify pronunciation issues in detail.)
-
-3. 语法评测
-   (Identify grammar issues in detail.)
-
-4. 整体评价
-   (Provide a warm, professional summary using short paragraphs.)
-
-Grammar Summary (grammarSummary):
-Identify 1 or 2 key grammar concepts. Explain simply in CHINESE.
-
-Scoring Criteria (0-100) & Brief Comments (IN CHINESE):
-- Fluency: Pace, hesitation, self-correction.
-- Pronunciation: Clarity, phonemes.
-- Intonation: Rhythm, stress, flow.
-- Vocabulary: Range, accuracy.
-- Emotion: Confidence, engagement.
-
-Output Language: Chinese (Simplified).
-`;
-};
-
-const buildRegeneratePrompt = (
-  sectionType: "highlights" | "pronunciation" | "grammar",
-  metadata: VideoMetadata,
-) => {
-  const { studentName, bookName, homeworkType } = metadata;
-
-  let specificInstruction = "";
-  let sectionHeader = "";
-
-  if (sectionType === "highlights") {
-    sectionHeader = "1. 作业亮点";
-    specificInstruction = `
-Focus ONLY on Section 1: Homework Highlights.
-Identify at least 3 specific strengths. Include specific examples.
-Be enthusiastic.
-Output ONLY this section, starting with the header "${sectionHeader}".
-Use CHINESE language.
-Ensure clear paragraph breaks.
-Do NOT use asterisks (*) or markdown bolding (**).
-`;
-  } else if (sectionType === "pronunciation") {
-    sectionHeader = "2. 发音评测";
-    specificInstruction = `
-Focus ONLY on Section 2: Pronunciation Evaluation.
-Identify ALL pronunciation errors.
-Format:
-> 问题：[Word/Sound] (Timestamp)
-- 听感诊断：...
-- 问题分析：...
-- 纠正方案：...
-Output ONLY this section, starting with the header "${sectionHeader}".
-Use CHINESE language.
-Do NOT use asterisks (*) or markdown bolding (**).
-`;
-  } else {
-    sectionHeader = "3. 语法评测";
-    specificInstruction = `
-Focus ONLY on Section 3: Grammar Evaluation.
-Identify ALL grammar errors.
-Format:
-> 问题：[Sentence] (Timestamp)
-- 问题分析：...
-- 纠正方案：...
-Output ONLY this section, starting with the header "${sectionHeader}".
-Use CHINESE language.
-Do NOT use asterisks (*) or markdown bolding (**).
-`;
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return cleaned.slice(firstBrace, lastBrace + 1);
   }
 
-  return `
-Role: Senior ESL English Teacher.
-Context: Student ${studentName || "Student"}, Book: ${bookName || "未指定"}, Type: ${homeworkType || "口语练习"}.
-Task: Re-evaluate ONLY the ${sectionType} section for the attached video.
-
-${specificInstruction}
-
-Output Language: Chinese (Simplified).
-Do NOT output JSON. Output plain text.
-Strictly NO asterisks (*) allowed in output.
-`;
+  return cleaned;
 };
 
 const safeFallbackResult = (rawText: string): AnalysisResult => {
@@ -274,35 +61,171 @@ const safeFallbackResult = (rawText: string): AnalysisResult => {
   };
 };
 
+const buildAnalyzePrompt = (
+  transcript: string,
+  metadata: VideoMetadata
+) => {
+  const { studentName, bookName, homeworkType, tutorName } = metadata;
+
+  const nameInstruction = studentName
+    ? `学生姓名：${studentName}。请在评价中自然使用这个名字。`
+    : `如果没有学生姓名，请使用“同学”称呼。`;
+
+  return `
+你是一位有20年经验的儿童英语口语测评专家。
+
+请基于下面这段学生英文口语转写文本，进行专业、细致、可执行的点评。
+
+【基础信息】
+${nameInstruction}
+绘本名称：${bookName || "未指定"}
+作业类型：${homeworkType || "口语练习"}
+辅导老师：${tutorName || "Teacher"}
+
+【学生口语转写文本】
+${transcript}
+
+【任务要求】
+请根据这段英文口语内容，输出以下结构化评分与点评。
+
+【严格要求】
+1. 只能返回 JSON
+2. 不要返回 markdown
+3. 不要加解释文字
+4. 不要使用 \`\`\`json
+5. 所有 comment 和说明文字必须使用中文
+6. 分数范围 0-100，必须是整数
+
+【JSON格式必须严格如下】
+{
+  "fluency": {
+    "score": 0,
+    "comment": ""
+  },
+  "pronunciation": {
+    "score": 0,
+    "comment": ""
+  },
+  "intonation": {
+    "score": 0,
+    "comment": ""
+  },
+  "vocabulary": {
+    "score": 0,
+    "comment": ""
+  },
+  "emotion": {
+    "score": 0,
+    "comment": ""
+  },
+  "overallComment": "",
+  "suggestions": ["", "", ""],
+  "grammarSummary": ""
+}
+
+【评分标准】
+- fluency：流畅度、停顿、卡顿、自我修正
+- pronunciation：发音清晰度、音素准确性
+- intonation：语调、重音、节奏自然度
+- vocabulary：词汇使用是否恰当、丰富
+- emotion：表达状态、自信度、感染力
+
+【overallComment要求】
+请按以下结构输出完整中文报告：
+1. 作业亮点
+2. 发音评测
+3. 语法评测
+4. 整体评价
+
+【grammarSummary要求】
+用中文总结1-2个最值得家长辅导的语法点。
+
+现在开始分析，并严格只返回 JSON。
+`;
+};
+
+const buildRegeneratePrompt = (
+  transcript: string,
+  sectionType: SectionType,
+  metadata: VideoMetadata
+) => {
+  const { studentName, bookName, homeworkType } = metadata;
+
+  let specificInstruction = "";
+
+  if (sectionType === "highlights") {
+    specificInstruction = `
+请只重写“作业亮点”部分。
+要求：
+1. 用中文输出
+2. 至少写出3个具体亮点
+3. 语气鼓励、自然
+4. 不要输出JSON
+5. 不要加星号
+`;
+  } else if (sectionType === "pronunciation") {
+    specificInstruction = `
+请只重写“发音评测”部分。
+要求：
+1. 用中文输出
+2. 指出具体发音问题
+3. 给出纠正建议
+4. 不要输出JSON
+5. 不要加星号
+`;
+  } else {
+    specificInstruction = `
+请只重写“语法评测”部分。
+要求：
+1. 用中文输出
+2. 指出具体语法问题
+3. 给出纠正建议
+4. 不要输出JSON
+5. 不要加星号
+`;
+  }
+
+  return `
+你是一位资深儿童英语老师。
+
+【学生信息】
+学生：${studentName || "同学"}
+绘本：${bookName || "未指定"}
+作业类型：${homeworkType || "口语练习"}
+
+【学生英文口语转写文本】
+${transcript}
+
+${specificInstruction}
+
+直接输出正文，不要输出JSON，不要加解释。
+`;
+};
+
 export const analyzeStudentVideo = async (
-  videoUrl: string,
-  metadata: VideoMetadata = {},
+  transcript: string,
+  metadata: VideoMetadata = {}
 ): Promise<AnalysisResult> => {
   try {
     const ai = getAiClient();
-    const { base64Video, mimeType } = await fetchVideoAsBase64(videoUrl);
-    const prompt = buildAnalyzePrompt(metadata);
+    const prompt = buildAnalyzePrompt(transcript, metadata);
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType,
-              data: base64Video,
-            },
-          },
-          { text: prompt },
-        ],
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema,
-      },
+    const response = await ai.chat.completions.create({
+      model: getModel(),
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content: "你是英语口语评分助手，只返回合法 JSON。",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
     });
 
-    const resultText = response.text;
+    const resultText = response.choices[0]?.message?.content || "";
     console.log("AI raw response:", resultText);
 
     if (!resultText) {
@@ -310,49 +233,74 @@ export const analyzeStudentVideo = async (
     }
 
     try {
-      return JSON.parse(resultText) as AnalysisResult;
+      const parsed = JSON.parse(extractJson(resultText)) as AnalysisResult;
+
+      return {
+        fluency: {
+          score: Number(parsed?.fluency?.score ?? 0),
+          comment: parsed?.fluency?.comment ?? "AI返回格式异常",
+        },
+        pronunciation: {
+          score: Number(parsed?.pronunciation?.score ?? 0),
+          comment: parsed?.pronunciation?.comment ?? "AI返回格式异常",
+        },
+        intonation: {
+          score: Number(parsed?.intonation?.score ?? 0),
+          comment: parsed?.intonation?.comment ?? "AI返回格式异常",
+        },
+        vocabulary: {
+          score: Number(parsed?.vocabulary?.score ?? 0),
+          comment: parsed?.vocabulary?.comment ?? "AI返回格式异常",
+        },
+        emotion: {
+          score: Number(parsed?.emotion?.score ?? 0),
+          comment: parsed?.emotion?.comment ?? "AI返回格式异常",
+        },
+        overallComment: parsed?.overallComment ?? "AI返回格式异常",
+        suggestions: Array.isArray(parsed?.suggestions) ? parsed.suggestions : [],
+        grammarSummary: parsed?.grammarSummary ?? "",
+      };
     } catch (error) {
       console.error("AI returned non-JSON:", resultText);
       return safeFallbackResult(resultText);
     }
   } catch (error) {
-    console.error("Gemini analyze error:", error);
+    console.error("LLM analyze error:", error);
 
     const message =
-      error instanceof Error ? error.message : "Unknown Gemini error";
+      error instanceof Error ? error.message : "Unknown LLM error";
 
     return safeFallbackResult(`AI分析失败：${message}`);
   }
 };
 
 export const regenerateFeedbackSection = async (
-  videoUrl: string,
-  sectionType: "highlights" | "pronunciation" | "grammar",
-  metadata: VideoMetadata,
+  transcript: string,
+  sectionType: SectionType,
+  metadata: VideoMetadata
 ): Promise<string> => {
   try {
     const ai = getAiClient();
-    const { base64Video, mimeType } = await fetchVideoAsBase64(videoUrl);
-    const prompt = buildRegeneratePrompt(sectionType, metadata);
+    const prompt = buildRegeneratePrompt(transcript, sectionType, metadata);
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType,
-              data: base64Video,
-            },
-          },
-          { text: prompt },
-        ],
-      },
+    const response = await ai.chat.completions.create({
+      model: getModel(),
+      temperature: 0.4,
+      messages: [
+        {
+          role: "system",
+          content: "你是英语口语点评助手，只输出正文，不输出JSON。",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
     });
 
-    return response.text || "";
+    return response.choices[0]?.message?.content?.trim() || "";
   } catch (error) {
-    console.error("Gemini regenerate error:", error);
+    console.error("LLM regenerate error:", error);
     return "AI暂时无法重新生成该部分内容，请稍后重试。";
   }
 };
