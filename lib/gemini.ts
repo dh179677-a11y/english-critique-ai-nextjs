@@ -261,6 +261,36 @@ const extractJson = (rawText: string): string => {
   return cleaned;
 };
 
+const normalizeAiErrorMessage = (message: string): string => {
+  const normalized = message.trim();
+  const lower = normalized.toLowerCase();
+
+  if (
+    lower.includes("not implemented") ||
+    lower.includes("not_implemented") ||
+    lower.includes("500 not implemented")
+  ) {
+    return "当前 LLM 中转接口未实现 Responses API 或 input_file 视频输入，不支持这条直传视频方案。";
+  }
+
+  if (
+    lower.includes("responses") &&
+    (lower.includes("unsupported") || lower.includes("not found"))
+  ) {
+    return "当前 LLM 中转不支持 Responses API。";
+  }
+
+  if (
+    lower.includes("input_file") ||
+    lower.includes("file_data") ||
+    lower.includes("unsupported file")
+  ) {
+    return "当前 LLM 中转不支持 input_file / file_data 视频文件输入。";
+  }
+
+  return normalized;
+};
+
 const buildAnalyzePrompt = (metadata: VideoMetadata) => {
   const { studentName, bookName, homeworkType, tutorName } = metadata;
 
@@ -473,7 +503,7 @@ export const analyzeStudentVideo = async (
     const message =
       error instanceof Error ? error.message : "Unknown LLM error";
 
-    throw new Error(message);
+    throw new Error(normalizeAiErrorMessage(message));
   }
 };
 
@@ -511,6 +541,6 @@ export const regenerateFeedbackSection = async (
     console.error("LLM regenerate error:", error);
     const message =
       error instanceof Error ? error.message : "Unknown LLM error";
-    throw new Error(message);
+    throw new Error(normalizeAiErrorMessage(message));
   }
 };
