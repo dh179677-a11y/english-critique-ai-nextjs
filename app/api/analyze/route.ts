@@ -35,6 +35,7 @@ export async function POST(request: Request) {
     return NextResponse.json(result);
   } catch (error) {
     console.error("Analyze route error:", error);
-    return NextResponse.json({ error: "分析失败" }, { status: 500 });
+    const message = error instanceof Error ? error.message : "分析失败";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

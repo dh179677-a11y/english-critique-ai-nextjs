@@ -261,19 +261,6 @@ const extractJson = (rawText: string): string => {
   return cleaned;
 };
 
-const safeFallbackResult = (rawText: string): AnalysisResult => {
-  return {
-    fluency: { score: 0, comment: "AI返回格式异常" },
-    pronunciation: { score: 0, comment: "AI返回格式异常" },
-    intonation: { score: 0, comment: "AI返回格式异常" },
-    vocabulary: { score: 0, comment: "AI返回格式异常" },
-    emotion: { score: 0, comment: "AI返回格式异常" },
-    overallComment: rawText || "AI暂时未返回标准结果，请稍后重试。",
-    suggestions: [],
-    grammarSummary: "",
-  };
-};
-
 const buildAnalyzePrompt = (metadata: VideoMetadata) => {
   const { studentName, bookName, homeworkType, tutorName } = metadata;
 
@@ -443,7 +430,7 @@ export const analyzeStudentVideo = async (
 
     if (!resultText) {
       console.error("AI response had no extractable text");
-      return safeFallbackResult("AI没有返回内容。");
+      throw new Error("AI没有返回可解析文本，可能不支持 Responses API 或 input_file");
     }
 
     try {
@@ -474,9 +461,11 @@ export const analyzeStudentVideo = async (
         suggestions: Array.isArray(parsed?.suggestions) ? parsed.suggestions : [],
         grammarSummary: parsed?.grammarSummary ?? "",
       };
-    } catch (error) {
+    } catch {
       console.error("AI returned non-JSON:", resultText);
-      return safeFallbackResult(resultText);
+      throw new Error(
+        `AI返回的不是有效JSON：${resultText.slice(0, 500) || "empty response"}`
+      );
     }
   } catch (error) {
     console.error("LLM analyze error:", error);
@@ -484,7 +473,7 @@ export const analyzeStudentVideo = async (
     const message =
       error instanceof Error ? error.message : "Unknown LLM error";
 
-    return safeFallbackResult(`AI分析失败：${message}`);
+    throw new Error(message);
   }
 };
 
@@ -520,6 +509,8 @@ export const regenerateFeedbackSection = async (
     return extractResponseText(response);
   } catch (error) {
     console.error("LLM regenerate error:", error);
-    return "AI暂时无法重新生成该部分内容，请稍后重试。";
+    const message =
+      error instanceof Error ? error.message : "Unknown LLM error";
+    throw new Error(message);
   }
 };

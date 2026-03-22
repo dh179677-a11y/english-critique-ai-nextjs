@@ -62,7 +62,13 @@ export const analyzeStudentVideo = async (
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Analyze request failed: ${text}`);
+
+    try {
+      const data = JSON.parse(text) as { error?: string };
+      throw new Error(data.error || `Analyze request failed: ${text}`);
+    } catch {
+      throw new Error(text || "Analyze request failed");
+    }
   }
 
   return (await response.json()) as AnalysisResult;
@@ -89,7 +95,13 @@ export const regenerateFeedbackSection = async (
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Regenerate request failed: ${text}`);
+
+    try {
+      const data = JSON.parse(text) as { error?: string };
+      throw new Error(data.error || `Regenerate request failed: ${text}`);
+    } catch {
+      throw new Error(text || "Regenerate request failed");
+    }
   }
 
   const data = (await response.json()) as { content?: string };

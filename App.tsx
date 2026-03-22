@@ -77,7 +77,11 @@ const App: React.FC = () => {
     } catch (error) {
       console.error(error);
       setStatus(AppStatus.ERROR);
-      setErrorMsg('分析失败，请重试。可能是视频过大或网络问题。 (Analysis failed. Try a smaller video.)');
+      setErrorMsg(
+        error instanceof Error && error.message
+          ? error.message
+          : '分析失败，请重试。'
+      );
     }
   };
 
