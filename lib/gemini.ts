@@ -10,14 +10,6 @@ export interface VideoMetadata {
 
 type SectionType = "highlights" | "pronunciation" | "grammar";
 
-const ALLOWED_VIDEO_MIME_TYPES = new Set([
-  "video/mp4",
-  "video/quicktime",
-  "video/webm",
-  "video/x-matroska",
-  "video/ogg",
-]);
-
 const ALLOWED_BLOB_HOST_SUFFIXES = [
   "blob.vercel-storage.com",
   "public.blob.vercel-storage.com",
@@ -47,58 +39,21 @@ const getModel = () => {
   return process.env.LLM_MODEL || "gemini-3.1-pro-preview-cli";
 };
 
-const normalizeMimeType = (
-  contentType: string | null | undefined,
-  fallback = "video/mp4"
-): string => {
-  const normalized = contentType?.split(";")[0]?.trim().toLowerCase();
-
-  if (!normalized) {
-    return fallback;
+const normalizeVideoSource = (videoSource: string): string => {
+  if (videoSource.startsWith("data:video/")) {
+    return videoSource;
   }
 
-  return ALLOWED_VIDEO_MIME_TYPES.has(normalized) ? normalized : fallback;
-};
-
-const inferMimeTypeFromPathname = (pathname: string): string => {
-  const normalized = pathname.toLowerCase();
-
-  if (normalized.endsWith(".mp4")) return "video/mp4";
-  if (normalized.endsWith(".mov")) return "video/quicktime";
-  if (normalized.endsWith(".webm")) return "video/webm";
-  if (normalized.endsWith(".mkv")) return "video/x-matroska";
-  if (normalized.endsWith(".ogg")) return "video/ogg";
-
-  return "video/mp4";
-};
-
-const sanitizeFilename = (pathname: string, mimeType: string): string => {
-  const rawName = pathname.split("/").pop()?.trim() || "";
-  const cleaned = rawName.replace(/[^a-zA-Z0-9._-]/g, "");
-
-  if (cleaned) {
-    return cleaned;
-  }
-
-  if (mimeType === "video/quicktime") return `video-${Date.now()}.mov`;
-  if (mimeType === "video/webm") return `video-${Date.now()}.webm`;
-  if (mimeType === "video/x-matroska") return `video-${Date.now()}.mkv`;
-  if (mimeType === "video/ogg") return `video-${Date.now()}.ogg`;
-
-  return `video-${Date.now()}.mp4`;
-};
-
-const assertSupportedVideoUrl = (videoUrl: string): URL => {
   let parsedUrl: URL;
 
   try {
-    parsedUrl = new URL(videoUrl);
+    parsedUrl = new URL(videoSource);
   } catch {
-    throw new Error("videoUrl is invalid");
+    throw new Error("video source is invalid");
   }
 
   if (parsedUrl.protocol !== "https:") {
-    throw new Error("videoUrl must use https");
+    throw new Error("video source must use https or data URL");
   }
 
   const isAllowedHost = ALLOWED_BLOB_HOST_SUFFIXES.some((suffix) =>
@@ -106,32 +61,10 @@ const assertSupportedVideoUrl = (videoUrl: string): URL => {
   );
 
   if (!isAllowedHost) {
-    throw new Error("videoUrl host is not allowed");
+    throw new Error("video source host is not allowed");
   }
 
-  return parsedUrl;
-};
-
-const downloadVideoInput = async (videoUrl: string) => {
-  const parsedUrl = assertSupportedVideoUrl(videoUrl);
-  const fallbackMimeType = inferMimeTypeFromPathname(parsedUrl.pathname);
-  const response = await fetch(parsedUrl, { cache: "no-store" });
-
-  if (!response.ok) {
-    throw new Error(`Failed to download video: ${response.status}`);
-  }
-
-  const mimeType = normalizeMimeType(
-    response.headers.get("content-type"),
-    fallbackMimeType
-  );
-  const arrayBuffer = await response.arrayBuffer();
-  const base64Data = Buffer.from(arrayBuffer).toString("base64");
-
-  return {
-    filename: sanitizeFilename(parsedUrl.pathname, mimeType),
-    fileData: `data:${mimeType};base64,${base64Data}`,
-  };
+  return parsedUrl.toString();
 };
 
 const extractTextFromContentPart = (part: unknown): string => {
@@ -158,91 +91,80 @@ const extractTextFromContentPart = (part: unknown): string => {
   return "";
 };
 
-const extractTextFromOutput = (response: Record<string, unknown>): string => {
-  const output = response.output;
-
-  if (!Array.isArray(output)) {
-    return "";
-  }
-
-  const texts = output.flatMap((item) => {
-    if (!item || typeof item !== "object") {
-      return [];
-    }
-
-    const content = (item as { content?: unknown }).content;
-
-    if (!Array.isArray(content)) {
-      return [];
-    }
-
-    return content
-      .map(extractTextFromContentPart)
-      .filter((value) => typeof value === "string" && value.trim().length > 0);
-  });
-
-  return texts.join("\n").trim();
-};
-
-const extractTextFromChoices = (response: Record<string, unknown>): string => {
-  const choices = response.choices;
-
-  if (!Array.isArray(choices)) {
-    return "";
-  }
-
-  const texts = choices.flatMap((choice) => {
-    if (!choice || typeof choice !== "object") {
-      return [];
-    }
-
-    const message = (choice as { message?: unknown }).message;
-
-    if (!message || typeof message !== "object") {
-      return [];
-    }
-
-    const content = (message as { content?: unknown }).content;
-
-    if (typeof content === "string") {
-      return [content];
-    }
-
-    if (!Array.isArray(content)) {
-      return [];
-    }
-
-    return content
-      .map(extractTextFromContentPart)
-      .filter((value) => typeof value === "string" && value.trim().length > 0);
-  });
-
-  return texts.join("\n").trim();
-};
-
-const extractResponseText = (
-  response: Awaited<ReturnType<OpenAI["responses"]["create"]>>
+const extractChatCompletionText = (
+  response: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>
 ) => {
-  if ("output_text" in response && typeof response.output_text === "string") {
-    return response.output_text.trim();
+  if (!("choices" in response) || !Array.isArray(response.choices)) {
+    return "";
   }
 
-  if (response && typeof response === "object") {
-    const looseResponse = response as unknown as Record<string, unknown>;
-    const outputText = extractTextFromOutput(looseResponse);
+  const content = response.choices[0]?.message?.content;
 
-    if (outputText) {
-      return outputText;
-    }
+  if (typeof content === "string") {
+    return content.trim();
+  }
 
-    const choiceText = extractTextFromChoices(looseResponse);
+  if (!Array.isArray(content)) {
+    return "";
+  }
 
-    if (choiceText) {
-      return choiceText;
+  const contentParts = content as unknown[];
+
+  return contentParts
+    .map(extractTextFromContentPart)
+    .filter((value: string) => value.trim().length > 0)
+    .join("\n")
+    .trim();
+};
+
+const buildVideoContentVariants = (prompt: string, videoUrl: string) => {
+  return [
+    [
+      { type: "text", text: prompt },
+      { type: "video_url", video_url: { url: videoUrl } },
+    ],
+    [
+      { type: "text", text: prompt },
+      { type: "input_video", video_url: videoUrl },
+    ],
+    [
+      { type: "text", text: prompt },
+      { type: "image_url", image_url: { url: videoUrl } },
+    ],
+  ] as Array<Array<Record<string, unknown>>>;
+};
+
+const createVideoChatCompletion = async (
+  ai: OpenAI,
+  prompt: string,
+  videoUrl: string,
+  options?: { responseFormat?: "json_object"; temperature?: number }
+) => {
+  const videoSource = normalizeVideoSource(videoUrl);
+  const variants = buildVideoContentVariants(prompt, videoSource);
+  let lastError: unknown;
+
+  for (const content of variants) {
+    try {
+      return await ai.chat.completions.create({
+        model: getModel(),
+        temperature: options?.temperature,
+        ...(options?.responseFormat
+          ? { response_format: { type: options.responseFormat } }
+          : {}),
+        messages: [
+          {
+            role: "user",
+            content: content as never,
+          },
+        ],
+      } as never);
+    } catch (error) {
+      lastError = error;
     }
   }
 
-  return "";
+  throw lastError;
 };
 
 const extractJson = (rawText: string): string => {
@@ -270,7 +192,7 @@ const normalizeAiErrorMessage = (message: string): string => {
     lower.includes("not_implemented") ||
     lower.includes("500 not implemented")
   ) {
-    return "当前 LLM 中转接口未实现 Responses API 或 input_file 视频输入，不支持这条直传视频方案。";
+    return "当前 LLM 中转接口未实现视频分析所需能力，当前这版 chat.completions 视频传参也不被支持。";
   }
 
   if (
@@ -286,6 +208,14 @@ const normalizeAiErrorMessage = (message: string): string => {
     lower.includes("unsupported file")
   ) {
     return "当前 LLM 中转不支持 input_file / file_data 视频文件输入。";
+  }
+
+  if (
+    lower.includes("video_url") ||
+    lower.includes("input_video") ||
+    lower.includes("video")
+  ) {
+    return "当前 LLM 中转不接受这版视频字段格式，说明它的 chat.completions 视频参数与当前实现不兼容。";
   }
 
   return normalized;
@@ -429,38 +359,16 @@ export const analyzeStudentVideo = async (
   try {
     const ai = getAiClient();
     const prompt = buildAnalyzePrompt(metadata);
-    const videoInput = await downloadVideoInput(videoUrl);
-    const response = await ai.responses.create({
-      model: getModel(),
-      text: {
-        format: {
-          type: "json_object",
-        },
-      },
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: prompt,
-            },
-            {
-              type: "input_file",
-              filename: videoInput.filename,
-              file_data: videoInput.fileData,
-            },
-          ],
-        },
-      ],
+    const response = await createVideoChatCompletion(ai, prompt, videoUrl, {
+      responseFormat: "json_object",
+      temperature: 0.2,
     });
-
-    const resultText = extractResponseText(response);
+    const resultText = extractChatCompletionText(response);
     console.log("AI raw response:", resultText);
 
     if (!resultText) {
       console.error("AI response had no extractable text");
-      throw new Error("AI没有返回可解析文本，可能不支持 Responses API 或 input_file");
+      throw new Error("AI没有返回可解析文本，可能不支持 chat.completions 视频输入。");
     }
 
     try {
@@ -515,28 +423,11 @@ export const regenerateFeedbackSection = async (
   try {
     const ai = getAiClient();
     const prompt = buildRegeneratePrompt(sectionType, metadata);
-    const videoInput = await downloadVideoInput(videoUrl);
-    const response = await ai.responses.create({
-      model: getModel(),
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: prompt,
-            },
-            {
-              type: "input_file",
-              filename: videoInput.filename,
-              file_data: videoInput.fileData,
-            },
-          ],
-        },
-      ],
+    const response = await createVideoChatCompletion(ai, prompt, videoUrl, {
+      temperature: 0.4,
     });
 
-    return extractResponseText(response);
+    return extractChatCompletionText(response);
   } catch (error) {
     console.error("LLM regenerate error:", error);
     const message =

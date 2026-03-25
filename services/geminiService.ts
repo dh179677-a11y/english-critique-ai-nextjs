@@ -1,5 +1,4 @@
 import { AnalysisResult } from "@/types";
-import { upload } from "@vercel/blob/client";
 
 export interface VideoMetadata {
   studentName?: string;
@@ -10,54 +9,25 @@ export interface VideoMetadata {
 
 type SectionType = "highlights" | "pronunciation" | "grammar";
 
-const ALLOWED_UPLOAD_MIME_TYPES = new Set([
-  "video/mp4",
-  "video/quicktime",
-  "video/webm",
-  "video/x-matroska",
-  "video/ogg",
-]);
+const buildAnalyzeFormData = (videoFile: File, metadata: VideoMetadata) => {
+  const formData = new FormData();
+  formData.append("video", videoFile);
 
-const getSafeUploadMimeType = (mimeType: string): string => {
-  const normalized = mimeType.split(";")[0]?.trim().toLowerCase();
-  if (!normalized) return "video/mp4";
-  return ALLOWED_UPLOAD_MIME_TYPES.has(normalized) ? normalized : "video/mp4";
-};
+  if (metadata.studentName) formData.append("studentName", metadata.studentName);
+  if (metadata.bookName) formData.append("bookName", metadata.bookName);
+  if (metadata.homeworkType) formData.append("homeworkType", metadata.homeworkType);
+  if (metadata.tutorName) formData.append("tutorName", metadata.tutorName);
 
-const getSafeUploadExt = (fileName: string): string => {
-  const ext = fileName.split(".").pop()?.toLowerCase() || "";
-  return ext.replace(/[^a-z0-9]/g, "").slice(0, 10);
-};
-
-const uploadVideo = async (videoFile: File): Promise<string> => {
-  const safeMimeType = getSafeUploadMimeType(videoFile.type);
-  const safeExt = getSafeUploadExt(videoFile.name);
-  const pathname = `videos/video-${Date.now()}${safeExt ? `.${safeExt}` : ".mp4"}`;
-
-  const blob = await upload(pathname, videoFile, {
-    access: "public",
-    handleUploadUrl: "/api/upload",
-    clientPayload: JSON.stringify({ mimeType: safeMimeType }),
-  });
-
-  return blob.url;
+  return formData;
 };
 
 export const analyzeStudentVideo = async (
   videoFile: File,
   metadata: VideoMetadata = {}
 ): Promise<AnalysisResult> => {
-  const videoUrl = await uploadVideo(videoFile);
-
   const response = await fetch("/api/analyze", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      videoUrl,
-      ...metadata,
-    }),
+    body: buildAnalyzeFormData(videoFile, metadata),
   });
 
   if (!response.ok) {
@@ -82,18 +52,12 @@ export const regenerateFeedbackSection = async (
   sectionType: SectionType,
   metadata: VideoMetadata
 ): Promise<string> => {
-  const videoUrl = await uploadVideo(videoFile);
+  const formData = buildAnalyzeFormData(videoFile, metadata);
+  formData.append("sectionType", sectionType);
 
   const response = await fetch("/api/regenerate", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      videoUrl,
-      sectionType,
-      ...metadata,
-    }),
+    body: formData,
   });
 
   if (!response.ok) {

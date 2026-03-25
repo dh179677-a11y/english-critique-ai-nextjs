@@ -5,31 +5,27 @@ export const runtime = "nodejs";
 
 type SectionType = "highlights" | "pronunciation" | "grammar";
 
+const getStringValue = (value: FormDataEntryValue | null) => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+};
+
+const fileToDataUrl = async (file: File) => {
+  const mimeType = file.type || "video/mp4";
+  const arrayBuffer = await file.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  return `data:${mimeType};base64,${base64}`;
+};
+
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    const formData = await request.formData();
+    const video = formData.get("video");
+    const sectionType = getStringValue(formData.get("sectionType"));
 
-    const {
-      videoUrl,
-      sectionType,
-      studentName,
-      bookName,
-      homeworkType,
-      tutorName,
-    } = body as {
-      videoUrl?: string;
-      sectionType?: SectionType;
-      studentName?: string;
-      bookName?: string;
-      homeworkType?: string;
-      tutorName?: string;
-    };
-
-    if (!videoUrl || typeof videoUrl !== "string") {
-      return NextResponse.json(
-        { error: "videoUrl is required" },
-        { status: 400 }
-      );
+    if (!(video instanceof File)) {
+      return NextResponse.json({ error: "video file is required" }, { status: 400 });
     }
 
     if (
@@ -43,15 +39,16 @@ export async function POST(request: Request) {
     }
 
     const metadata: VideoMetadata = {
-      studentName: studentName?.trim() || undefined,
-      bookName: bookName?.trim() || undefined,
-      homeworkType: homeworkType?.trim() || undefined,
-      tutorName: tutorName?.trim() || undefined,
+      studentName: getStringValue(formData.get("studentName")),
+      bookName: getStringValue(formData.get("bookName")),
+      homeworkType: getStringValue(formData.get("homeworkType")),
+      tutorName: getStringValue(formData.get("tutorName")),
     };
+    const videoSource = await fileToDataUrl(video);
 
     const result = await regenerateFeedbackSection(
-      videoUrl,
-      sectionType,
+      videoSource,
+      sectionType as SectionType,
       metadata
     );
 
