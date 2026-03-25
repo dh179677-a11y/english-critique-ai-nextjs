@@ -183,6 +183,68 @@ const extractJson = (rawText: string): string => {
   return cleaned;
 };
 
+const getErrorDebugMessage = (error: unknown): string => {
+  if (!error || typeof error !== "object") {
+    return String(error ?? "Unknown error");
+  }
+
+  const record = error as {
+    name?: unknown;
+    message?: unknown;
+    status?: unknown;
+    code?: unknown;
+    cause?: unknown;
+    error?: unknown;
+  };
+
+  const parts: string[] = [];
+
+  if (typeof record.name === "string" && record.name) {
+    parts.push(`name=${record.name}`);
+  }
+
+  if (typeof record.message === "string" && record.message) {
+    parts.push(`message=${record.message}`);
+  }
+
+  if (typeof record.status === "number") {
+    parts.push(`status=${record.status}`);
+  }
+
+  if (typeof record.code === "string" && record.code) {
+    parts.push(`code=${record.code}`);
+  }
+
+  if (record.error && typeof record.error === "object") {
+    const nested = record.error as { message?: unknown; code?: unknown };
+    if (typeof nested.message === "string" && nested.message) {
+      parts.push(`api_message=${nested.message}`);
+    }
+    if (typeof nested.code === "string" && nested.code) {
+      parts.push(`api_code=${nested.code}`);
+    }
+  }
+
+  if (record.cause && typeof record.cause === "object") {
+    const cause = record.cause as {
+      code?: unknown;
+      errno?: unknown;
+      message?: unknown;
+    };
+    if (typeof cause.code === "string" && cause.code) {
+      parts.push(`cause_code=${cause.code}`);
+    }
+    if (typeof cause.errno === "string" && cause.errno) {
+      parts.push(`cause_errno=${cause.errno}`);
+    }
+    if (typeof cause.message === "string" && cause.message) {
+      parts.push(`cause_message=${cause.message}`);
+    }
+  }
+
+  return parts.join(" | ") || "Unknown error";
+};
+
 const normalizeAiErrorMessage = (message: string): string => {
   const normalized = message.trim();
   const lower = normalized.toLowerCase();
@@ -216,6 +278,17 @@ const normalizeAiErrorMessage = (message: string): string => {
     lower.includes("video")
   ) {
     return "当前 LLM 中转不接受这版视频字段格式，说明它的 chat.completions 视频参数与当前实现不兼容。";
+  }
+
+  if (
+    lower.includes("connection error") ||
+    lower.includes("fetch failed") ||
+    lower.includes("econnreset") ||
+    lower.includes("enotfound") ||
+    lower.includes("etimedout") ||
+    lower.includes("network")
+  ) {
+    return "连接上游 LLM 失败。请优先检查 Vercel 线上环境变量里的 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL，并确认该中转接口允许来自 Vercel 的服务端请求。";
   }
 
   return normalized;
@@ -407,6 +480,7 @@ export const analyzeStudentVideo = async (
     }
   } catch (error) {
     console.error("LLM analyze error:", error);
+    console.error("LLM analyze error details:", getErrorDebugMessage(error));
 
     const message =
       error instanceof Error ? error.message : "Unknown LLM error";
@@ -430,6 +504,7 @@ export const regenerateFeedbackSection = async (
     return extractChatCompletionText(response);
   } catch (error) {
     console.error("LLM regenerate error:", error);
+    console.error("LLM regenerate error details:", getErrorDebugMessage(error));
     const message =
       error instanceof Error ? error.message : "Unknown LLM error";
     throw new Error(normalizeAiErrorMessage(message));
