@@ -2,19 +2,24 @@
 
 import React, { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { getSessionUser } from "@/lib/clientAuth";
+import {
+  getHomePathForRole,
+  getSessionProfile,
+  type UserRole,
+} from "@/lib/clientAuth";
 
 interface AuthGateProps {
   children: React.ReactNode;
+  allowedRoles?: UserRole[];
 }
 
-const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
+const AuthGate: React.FC<AuthGateProps> = ({ children, allowedRoles }) => {
   const [ready, setReady] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
-    const currentUser = getSessionUser();
+    const currentUser = getSessionProfile();
 
     if (!currentUser) {
       if (pathname !== "/login" && pathname !== "/register") {
@@ -23,8 +28,13 @@ const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
       return;
     }
 
+    if (allowedRoles?.length && !allowedRoles.includes(currentUser.role)) {
+      router.replace(getHomePathForRole(currentUser.role));
+      return;
+    }
+
     setReady(true);
-  }, [pathname, router]);
+  }, [allowedRoles, pathname, router]);
 
   if (!ready) {
     return (

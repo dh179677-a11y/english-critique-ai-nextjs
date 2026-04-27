@@ -6,7 +6,7 @@ import html2canvas from 'html2canvas';
 interface FeedbackSectionProps {
   data: AnalysisResult;
   onDataChange: (newData: AnalysisResult) => void;
-  videoFile: File | null;
+  videoObjectKey: string | null;
   metadata: VideoMetadata;
 }
 
@@ -85,7 +85,30 @@ const parseSections = (text: string): string[][] => {
   return sections;
 };
 
-const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, videoFile, metadata }) => {
+const splitBodyBlocks = (lines: string[]): string[][] => {
+  const blocks: string[][] = [];
+  let current: string[] = [];
+
+  lines.forEach((line) => {
+    if (!line.trim()) {
+      if (current.length > 0) {
+        blocks.push(current);
+        current = [];
+      }
+      return;
+    }
+
+    current.push(line);
+  });
+
+  if (current.length > 0) {
+    blocks.push(current);
+  }
+
+  return blocks;
+};
+
+const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, videoObjectKey, metadata }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [isEditingReport, setIsEditingReport] = useState(false);
   const [regeneratingSection, setRegeneratingSection] = useState<string | null>(null);
@@ -159,6 +182,14 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
 
     report += `【详细点评】\n`;
     report += `${data.overallComment}\n\n`;
+
+    if (data.suggestions?.length) {
+      report += `【训练建议】\n`;
+      data.suggestions.forEach((item, index) => {
+        report += `${index + 1}. ${item}\n`;
+      });
+      report += `\n`;
+    }
 
     if (data.grammarSummary) {
       report += `【重点语法讲解】\n`;
@@ -251,14 +282,14 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
   };
 
   const handleRegenerate = async (sectionType: 'highlights' | 'pronunciation' | 'grammar') => {
-    if (!videoFile) {
-        alert("找不到视频文件，无法重新分析。(Video file missing)");
+    if (!videoObjectKey) {
+        alert("找不到已上传的视频，无法重新分析。(Uploaded video missing)");
         return;
     }
     setRegeneratingSection(sectionType);
 
     try {
-        const newContent = await regenerateFeedbackSection(videoFile, sectionType, metadata);
+        const newContent = await regenerateFeedbackSection(videoObjectKey, sectionType, metadata);
         
         // Replace content in existing overallComment
         // Logic: Find start of this section and start of next section
@@ -434,6 +465,10 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
          );
       }
 
+      const bodyBlocks = splitBodyBlocks(bodyLines);
+      const shouldRenderIssueCards =
+        displayHeader.includes('发音') || displayHeader.includes('语法');
+
       return (
         <div key={index} className={`mb-4 p-5 rounded-xl border ${containerStyle} shadow-sm transition-all hover:shadow-md group relative`}>
           {/* Header Line with Actions */}
@@ -480,41 +515,51 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
           </div>
           
           {/* Body Lines with Enhanced Formatting */}
-          <div className="">
-            {bodyLines.map((line, lineIdx) => {
-               const trimmedLine = line.trim();
-               
-               // Render Empty lines as Spacers
-               if (!trimmedLine) {
-                 return <div key={lineIdx} className="h-4"></div>;
-               }
-               
-               // Check for sub-headers (starts with > or * from legacy/hallucination)
-               const isSubHeader = trimmedLine.startsWith('>') || (trimmedLine.startsWith('*') && !trimmedLine.startsWith('**'));
-               // Check for list items (starts with -)
-               const isListItem = trimmedLine.startsWith('-');
-               
-               // Formatting logic
-               let className = "text-gray-700 text-sm sm:text-base leading-relaxed";
-               let displayContent = trimmedLine;
-               
-               if (isSubHeader) {
-                   className += " font-semibold text-gray-900 mt-3 mb-2 bg-white/50 p-2 rounded-lg -mx-2";
-                   displayContent = displayContent.replace(/^[>*]\s?/, '').trim(); // Remove marker
-               } else if (isListItem) {
-                   className += " pl-4 relative mb-2";
-                   displayContent = displayContent.substring(1).trim(); // Remove -
-               } else {
-                   // Regular paragraph
-                   className += " mb-4 text-justify";
-               }
-               
-               return (
-                 <div key={lineIdx} className={className}>
-                    {isListItem && <span className="absolute left-0 top-2.5 w-1.5 h-1.5 rounded-full bg-gray-400"></span>}
-                    {formatLineContent(displayContent)}
-                 </div>
-               );
+          <div className="space-y-3">
+            {bodyBlocks.map((block, blockIdx) => {
+              const blockHasIssueLine = block.some((line) => /^问题[：:]/.test(line.trim()));
+              const renderAsIssueCard = shouldRenderIssueCards && blockHasIssueLine;
+
+              return (
+                <div
+                  key={blockIdx}
+                  className={renderAsIssueCard ? "rounded-xl bg-white/80 px-4 py-3 shadow-sm" : ""}
+                >
+                  {block.map((line, lineIdx) => {
+                    const trimmedLine = line.trim();
+
+                    const isSubHeader =
+                      trimmedLine.startsWith('>') ||
+                      (trimmedLine.startsWith('*') && !trimmedLine.startsWith('**'));
+                    const isListItem = trimmedLine.startsWith('-');
+                    const isIssueTitle = /^问题[：:]/.test(trimmedLine);
+
+                    let className = "text-gray-700 text-sm sm:text-base leading-relaxed";
+                    let displayContent = trimmedLine;
+
+                    if (isSubHeader) {
+                      className += " font-semibold text-gray-900 mt-3 mb-2 bg-white/50 p-2 rounded-lg -mx-2";
+                      displayContent = displayContent.replace(/^[>*]\s?/, '').trim();
+                    } else if (isListItem) {
+                      className += " pl-4 relative mb-2";
+                      displayContent = displayContent.substring(1).trim();
+                    } else if (isIssueTitle) {
+                      className += " mb-3 font-semibold text-gray-900";
+                    } else {
+                      className += " mb-3 text-justify";
+                    }
+
+                    return (
+                      <div key={lineIdx} className={className}>
+                        {isListItem ? (
+                          <span className="absolute left-0 top-2.5 w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                        ) : null}
+                        {formatLineContent(displayContent)}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
             })}
           </div>
         </div>
@@ -577,29 +622,31 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
 
     {/* MAIN REPORT CONTAINER for EXPORT */}
     {/* Added bg-white and padding to the container itself so the background applies to the export correctly */}
-    <div className={`space-y-6 ${layoutStyles.container} bg-white p-4 sm:p-8 rounded-2xl pb-16`} id="feedback-report-container">
+    <div className={`space-y-5 ${layoutStyles.container} bg-white p-4 sm:p-6 rounded-[1.4rem] pb-12`} id="feedback-report-container">
         
         {/* UPDATED HEADER with Banner Background and Improved Alignment */}
-        <div className="relative overflow-hidden rounded-xl bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 p-6 mb-4">
+        <div className="relative mb-4 overflow-hidden rounded-[1.2rem] bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 p-5">
             
             {/* Decorative soft circles */}
             <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 rounded-full bg-blue-100 opacity-60 blur-3xl"></div>
             <div className="absolute bottom-0 left-0 -ml-12 -mb-12 w-48 h-48 rounded-full bg-purple-100 opacity-60 blur-3xl"></div>
 
-            <div className="relative z-10 flex items-center space-x-4">
+            <div className="relative z-10 flex items-center space-x-3">
                 {/* REMOVED border-4 border-white */}
-                <div className="w-[72px] h-[72px] rounded-full overflow-hidden shadow-md shrink-0 relative group bg-white">
+                <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full bg-white shadow-md group">
                     {!logoError ? (
                         <img 
-                            src={customLogo || "logo.png"} 
+                            src={customLogo || "/pixel-logo.png"} 
                             alt="Logo" 
                             className="w-full h-full object-cover"
                             onError={() => setLogoError(true)}
                         />
                     ) : (
-                        <div className="w-full h-full bg-gray-100 flex items-center justify-center text-[10px] text-gray-500 font-bold cursor-pointer">
-                            Logo
-                        </div>
+                        <img
+                            src="/pixel-logo.png"
+                            alt="EnglishPro logo"
+                            className="w-full h-full object-cover"
+                        />
                     )}
                     
                     {/* Hidden input to allow user to upload their own logo by clicking */}
@@ -613,13 +660,13 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
                     </label>
                 </div>
                 <div>
-                    <h2 className="text-3xl font-extrabold text-gray-800 tracking-wide leading-tight">英爸阅读营</h2>
+                    <h2 className="text-[1.75rem] font-extrabold leading-tight tracking-wide text-gray-800">英爸阅读营</h2>
                 </div>
             </div>
         </div>
 
         {/* Basic Info Bar - Placed at the top for Export Visibility */}
-        <div className={`bg-white rounded-xl shadow-sm border border-gray-200 p-4 ${isMobileLayout ? 'grid grid-cols-2 gap-4' : 'flex flex-wrap items-center justify-between gap-4'}`}>
+        <div className={`rounded-[1.2rem] border border-gray-200 bg-white p-4 shadow-sm ${isMobileLayout ? 'grid grid-cols-2 gap-4' : 'flex flex-wrap items-center justify-between gap-4'}`}>
                <div className={`flex items-center space-x-3 ${!isMobileLayout ? 'min-w-[120px]' : ''}`}>
                  <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0">
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -720,14 +767,14 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
         />
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="overflow-hidden rounded-[1.2rem] border border-gray-100 bg-white shadow-sm">
         {/* ADDED data-html2canvas-ignore="true" to the title BAR container buttons only */}
-        <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+        <div className="flex flex-col items-start justify-between gap-3 border-b border-gray-100 bg-gray-50 px-5 py-3.5 md:flex-row md:items-center">
             <div className="flex items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                 </svg>
-                <h3 className="text-lg font-bold text-gray-800">老师详细点评 (Teacher Critique)</h3>
+                <h3 className="text-base font-bold text-gray-800">老师详细点评 (Teacher Critique)</h3>
             </div>
             
             {/* Added data-html2canvas-ignore to the BUTTONS container only */}
@@ -780,7 +827,7 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
                 </button>
             </div>
         </div>
-        <div className="p-6 bg-white min-h-[300px]">
+        <div className="min-h-[280px] bg-white p-5">
              {isEditingReport ? (
                  <div className="space-y-2">
                      <p className="text-sm text-amber-600 bg-amber-50 p-2 rounded">
@@ -804,13 +851,13 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
 
       {/* Grammar Summary Section - Only show if defined (not deleted) */}
       {data.grammarSummary !== undefined && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden mt-6 group">
-          <div className="bg-indigo-50 px-6 py-4 border-b border-indigo-100 flex items-center justify-between">
+        <div className="group mt-5 overflow-hidden rounded-[1.2rem] border border-gray-100 bg-white shadow-sm">
+          <div className="flex items-center justify-between border-b border-indigo-100 bg-indigo-50 px-5 py-3.5">
               <div className="flex items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                 </svg>
-                <h3 className="text-lg font-bold text-indigo-900">重点语法讲解 (Key Grammar Points)</h3>
+                <h3 className="text-base font-bold text-indigo-900">重点语法讲解 (Key Grammar Points)</h3>
               </div>
               <button 
                   onClick={handleDeleteGrammar}
@@ -823,7 +870,7 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
                     </svg>
               </button>
           </div>
-          <div className="p-6">
+          <div className="p-5">
               {isEditingReport ? (
                   <textarea 
                       value={data.grammarSummary || ''}
@@ -841,9 +888,9 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({ data, onDataChange, v
       )}
 
       {/* FOOTER - Increased Padding for Export */}
-      <div className="flex justify-center items-center py-6 mt-6 border-t border-dashed border-gray-200">
-             <p className="text-base text-gray-600 font-medium text-center">
-                小红书/抖音搜索 <span className="font-bold text-gray-800 text-lg mx-1">英爸</span> 获取3-12岁英语规划与课程
+      <div className="mt-5 flex items-center justify-center border-t border-dashed border-gray-200 py-5">
+             <p className="text-center text-sm font-medium text-gray-600">
+                小红书/抖音搜索 <span className="mx-1 text-base font-bold text-gray-800">英爸</span> 获取3-12岁英语规划与课程
              </p>
       </div>
 

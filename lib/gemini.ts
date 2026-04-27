@@ -10,13 +10,6 @@ export interface VideoMetadata {
 
 type SectionType = "highlights" | "pronunciation" | "grammar";
 
-const ALLOWED_BLOB_HOST_SUFFIXES = [
-  "blob.vercel-storage.com",
-  "public.blob.vercel-storage.com",
-  ".blob.vercel-storage.com",
-  ".public.blob.vercel-storage.com",
-];
-
 const getAiClient = () => {
   const apiKey = process.env.LLM_API_KEY;
   const baseURL = process.env.LLM_BASE_URL;
@@ -36,7 +29,7 @@ const getAiClient = () => {
 };
 
 const getModel = () => {
-  return process.env.LLM_MODEL || "gemini-3.1-pro-preview-cli";
+  return process.env.LLM_MODEL || "gemini-3-pro-preview";
 };
 
 const normalizeVideoSource = (videoSource: string): string => {
@@ -54,14 +47,6 @@ const normalizeVideoSource = (videoSource: string): string => {
 
   if (parsedUrl.protocol !== "https:") {
     throw new Error("video source must use https or data URL");
-  }
-
-  const isAllowedHost = ALLOWED_BLOB_HOST_SUFFIXES.some((suffix) =>
-    parsedUrl.hostname.endsWith(suffix)
-  );
-
-  if (!isAllowedHost) {
-    throw new Error("video source host is not allowed");
   }
 
   return parsedUrl.toString();
@@ -121,14 +106,6 @@ const buildVideoContentVariants = (prompt: string, videoUrl: string) => {
   return [
     [
       { type: "text", text: prompt },
-      { type: "video_url", video_url: { url: videoUrl } },
-    ],
-    [
-      { type: "text", text: prompt },
-      { type: "input_video", video_url: videoUrl },
-    ],
-    [
-      { type: "text", text: prompt },
       { type: "image_url", image_url: { url: videoUrl } },
     ],
   ] as Array<Array<Record<string, unknown>>>;
@@ -181,6 +158,139 @@ const extractJson = (rawText: string): string => {
   }
 
   return cleaned;
+};
+
+const escapeControlCharsInJsonStrings = (input: string) => {
+  let output = "";
+  let inString = false;
+  let escaping = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+
+    if (escaping) {
+      output += char;
+      escaping = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      output += char;
+      escaping = true;
+      continue;
+    }
+
+    if (char === '"') {
+      output += char;
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      if (char === "\n") {
+        output += "\\n";
+        continue;
+      }
+      if (char === "\r") {
+        output += "\\r";
+        continue;
+      }
+      if (char === "\t") {
+        output += "\\t";
+        continue;
+      }
+    }
+
+    output += char;
+  }
+
+  return output;
+};
+
+const removeTrailingCommas = (input: string) =>
+  input.replace(/,\s*([}\]])/g, "$1");
+
+const parseSuggestionsArray = (rawValue: string): string[] => {
+  const suggestions: string[] = [];
+  const regex = /"([\s\S]*?)(?<!\\)"/g;
+  let match: RegExpExecArray | null = regex.exec(rawValue);
+
+  while (match) {
+    suggestions.push(
+      match[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, "\n")
+        .trim()
+    );
+    match = regex.exec(rawValue);
+  }
+
+  return suggestions.filter(Boolean);
+};
+
+const extractRegexString = (raw: string, pattern: RegExp) => {
+  const match = raw.match(pattern);
+  if (!match?.[1]) return "";
+
+  return match[1]
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, "\n")
+    .trim();
+};
+
+const extractMetric = (
+  raw: string,
+  key: "fluency" | "pronunciation" | "intonation" | "vocabulary" | "emotion"
+) => {
+  const metricPattern = new RegExp(
+    `"${key}"\\s*:\\s*\\{[\\s\\S]*?"score"\\s*:\\s*(\\d+)[\\s\\S]*?"comment"\\s*:\\s*"([\\s\\S]*?)"\\s*\\}`,
+    "i"
+  );
+  const match = raw.match(metricPattern);
+
+  return {
+    score: Number(match?.[1] ?? 0),
+    comment: match?.[2]
+      ? match[2].replace(/\\"/g, '"').replace(/\\n/g, "\n").trim()
+      : "AI返回格式异常",
+  };
+};
+
+const parseAnalysisResultText = (rawText: string): AnalysisResult => {
+  const extracted = extractJson(rawText);
+
+  try {
+    return JSON.parse(extracted) as AnalysisResult;
+  } catch {
+    try {
+      const repaired = removeTrailingCommas(
+        escapeControlCharsInJsonStrings(extracted)
+      );
+      return JSON.parse(repaired) as AnalysisResult;
+    } catch {
+      const suggestionsRaw =
+        rawText.match(/"suggestions"\s*:\s*\[([\s\S]*?)\]\s*,\s*"grammarSummary"/i)?.[1] ||
+        rawText.match(/"suggestions"\s*:\s*\[([\s\S]*?)\]\s*\}/i)?.[1] ||
+        "";
+
+      return {
+        fluency: extractMetric(rawText, "fluency"),
+        pronunciation: extractMetric(rawText, "pronunciation"),
+        intonation: extractMetric(rawText, "intonation"),
+        vocabulary: extractMetric(rawText, "vocabulary"),
+        emotion: extractMetric(rawText, "emotion"),
+        overallComment: extractRegexString(
+          rawText,
+          /"overallComment"\s*:\s*"([\s\S]*?)"\s*,\s*"suggestions"/i
+        ),
+        suggestions: parseSuggestionsArray(suggestionsRaw),
+        grammarSummary: extractRegexString(
+          rawText,
+          /"grammarSummary"\s*:\s*"([\s\S]*?)"\s*}/i
+        ),
+      };
+    }
+  }
 };
 
 const getErrorDebugMessage = (error: unknown): string => {
@@ -288,7 +398,7 @@ const normalizeAiErrorMessage = (message: string): string => {
     lower.includes("etimedout") ||
     lower.includes("network")
   ) {
-    return "连接上游 LLM 失败。请优先检查 Vercel 线上环境变量里的 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL，并确认该中转接口允许来自 Vercel 的服务端请求。";
+    return "连接上游 LLM 失败。请优先检查服务器环境变量里的 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL，并确认该中转接口允许来自你服务器的服务端请求。";
   }
 
   return normalized;
@@ -313,7 +423,8 @@ ${nameInstruction}
 辅导老师：${tutorName || "Teacher"}
 
 【任务要求】
-请根据视频中的英文口语表现，输出以下结构化评分与点评。
+请根据视频中的英文口语表现，输出“尽可能详细”的结构化评分与点评。
+你必须真的基于视频内容做逐句/逐段观察，不要只给泛泛而谈的套话。
 
 【严格要求】
 1. 只能返回 JSON
@@ -346,7 +457,7 @@ ${nameInstruction}
     "comment": ""
   },
   "overallComment": "",
-  "suggestions": ["", "", ""],
+  "suggestions": ["", "", "", "", ""],
   "grammarSummary": ""
 }
 
@@ -357,15 +468,57 @@ ${nameInstruction}
 - vocabulary：词汇使用是否恰当、丰富
 - emotion：表达状态、自信度、感染力
 
+【特殊排除规则】
+- 不要把绘本里常见的情绪收尾短句误判为问题，例如："Oh, no.", "No!", "Oh no!"
+- 如果学生在故事结尾或情绪转折处朗读这类短句，只要情境和语气基本合理，就不要单独拿出来作为“发音错误”或“语法错误”
+- 除非视频里这类短句确实出现了明显的严重误读、漏读、卡顿或完全错误的语气，否则不要分析这类句子
+- 优先分析真正影响理解的内容词、句子、连读、重音、尾音、时态和句型问题
+
 【overallComment要求】
-请按以下结构输出完整中文报告：
+overallComment 必须是一份详细中文长报告，严格按以下结构输出，标题必须原样保留：
+
 1. 作业亮点
+- 先写 1 段整体亮点总结。
+- 必须结合视频中的具体表现举例，尽量引用学生读到的词、短语或句子。
+- 至少提到 2 个带时间点的亮点，时间格式示例：00:26
+
 2. 发音评测
+- 这一部分必须尽量细，至少列 3 条，尽量给到 4-8 条。
+- 每条都按以下格式写，不要省略字段：
+问题：xxx（00:00）
+听感诊断：...
+问题分析：...
+纠正方案：...
+- 优先分析具体单词、词组、连读、爆破音、尾音、重音、元音、辅音、语调等问题。
+- 如果学生整体不错，也要指出“最值得继续优化”的细节点，不能写“无问题”。
+- 不要把 "Oh, no."、"No!" 这类绘本常见情绪句当作重点问题来分析，除非确实存在明显误读。
+
 3. 语法评测
+- 至少列 2 条，尽量给到 3-5 条。
+- 每条都按以下格式写，不要省略字段：
+问题：xxx（00:00）
+问题分析：...
+纠正方案：...
+- 如果视频里没有明显语法错误，也要挑选最值得优化的表达点，例如冠词、时态、固定搭配、to do 结构、单复数、介词等。
+- 不要编造明显不存在的长句，尽量基于视频里真实说出的短句、句型或可推断表达。
+- 不要把 "Oh, no."、"No!" 这类绘本情绪句当成语法问题案例。
+
 4. 整体评价
+- 用 2 段以上中文完成。
+- 第一段总结本次作业完成情况和主要进步。
+- 第二段给家长/老师可执行的训练建议。
+- 要自然点名学生姓名；如果没有姓名，用“同学”。
+
+【suggestions要求】
+- suggestions 必须返回 5 条以上短建议。
+- 每条都是可执行的训练动作，不要空泛。
+- 例如“每天用 ae-ro-plane 的方式慢速拆音 3 次，再加速连读”这种粒度。
 
 【grammarSummary要求】
-用中文总结1-2个最值得家长辅导的语法点。
+- 用中文输出 2-4 个重点语法点。
+- 每个点尽量包含：
+  语法点名称 + 适用规则 + 1 个正确示例
+- 内容要像老师写给家长看的辅导摘要，而不是一句空泛总结。
 
 现在开始分析，并严格只返回 JSON。
 `;
@@ -385,7 +538,8 @@ const buildRegeneratePrompt = (
 要求：
 1. 用中文输出
 2. 至少写出3个具体亮点
-3. 语气鼓励、自然
+3. 每个亮点尽量结合视频里的词句或时间点
+4. 语气鼓励、自然
 4. 不要输出JSON
 5. 不要加星号
 `;
@@ -394,8 +548,11 @@ const buildRegeneratePrompt = (
 请只重写“发音评测”部分。
 要求：
 1. 用中文输出
-2. 指出具体发音问题
-3. 给出纠正建议
+2. 至少列出3条问题，尽量带时间点
+3. 每条都包含：问题、听感诊断、问题分析、纠正方案
+4. 指出具体发音问题
+5. 给出纠正建议
+6. 不要把 "Oh, no."、"No!" 这类绘本常见情绪句拿来当重点问题，除非确实严重误读
 4. 不要输出JSON
 5. 不要加星号
 `;
@@ -404,8 +561,11 @@ const buildRegeneratePrompt = (
 请只重写“语法评测”部分。
 要求：
 1. 用中文输出
-2. 指出具体语法问题
-3. 给出纠正建议
+2. 至少列出2条问题，尽量带时间点
+3. 每条都包含：问题、问题分析、纠正方案
+4. 指出具体语法问题或最值得优化的表达点
+5. 给出纠正建议
+6. 不要把 "Oh, no."、"No!" 这类绘本情绪句当成语法问题
 4. 不要输出JSON
 5. 不要加星号
 `;
@@ -445,7 +605,7 @@ export const analyzeStudentVideo = async (
     }
 
     try {
-      const parsed = JSON.parse(extractJson(resultText)) as AnalysisResult;
+      const parsed = parseAnalysisResultText(resultText);
 
       return {
         fluency: {

@@ -4,7 +4,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/components/AuthGate";
-import { clearSessionUser, getSessionUser } from "@/lib/clientAuth";
+import { clearSessionUser, getSessionProfile } from "@/lib/clientAuth";
 import {
   getUserRecordById,
   updateUserRecord,
@@ -24,7 +24,7 @@ function RecordDetailContent() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const current = getSessionUser();
+    const current = getSessionProfile();
     if (!current) {
       router.replace("/login");
       return;
@@ -36,8 +36,8 @@ function RecordDetailContent() {
       return;
     }
 
-    setUsername(current);
-    setRecord(getUserRecordById(current, id));
+    setUsername(current.username);
+    setRecord(getUserRecordById(current.username, id));
     setReady(true);
   }, [params, router]);
 
@@ -66,15 +66,15 @@ function RecordDetailContent() {
 
   if (!record) {
     return (
-      <div className="min-h-screen bg-gray-100 pb-12">
+      <div className="min-h-screen bg-gray-100 pb-10">
         <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-          <div className="max-w-6xl mx-auto px-4 py-4 flex justify-between items-center">
+          <div className="max-w-[72rem] mx-auto px-4 py-3.5 flex justify-between items-center">
             <div className="flex items-center space-x-3">
               <div className="h-12 w-12 rounded-xl overflow-hidden">
                 <img src="/pixel-logo.png" alt="EnglishPro logo" className="h-full w-full object-cover" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-slate-900 tracking-tight">EnglishPro Critique AI</h1>
+                <h1 className="text-xl font-bold text-slate-900 tracking-tight">EnglishPro Critique AI</h1>
                 <p className="text-xs text-gray-500">智能口语测评助手</p>
               </div>
             </div>
@@ -85,7 +85,7 @@ function RecordDetailContent() {
             </div>
           </div>
         </header>
-        <main className="max-w-6xl mx-auto px-4 py-10">
+        <main className="max-w-[72rem] mx-auto px-4 py-8">
           <div className="bg-white border border-gray-200 rounded-2xl p-8 text-center text-gray-600">
             记录不存在或无权限查看。
           </div>
@@ -95,15 +95,15 @@ function RecordDetailContent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 pb-12">
+    <div className="min-h-screen bg-gray-100 pb-10">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex justify-between items-center">
+        <div className="max-w-[72rem] mx-auto px-4 py-3.5 flex justify-between items-center">
           <div className="flex items-center space-x-3">
             <div className="h-12 w-12 rounded-xl overflow-hidden">
               <img src="/pixel-logo.png" alt="EnglishPro logo" className="h-full w-full object-cover" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-slate-900 tracking-tight">EnglishPro Critique AI</h1>
+              <h1 className="text-xl font-bold text-slate-900 tracking-tight">EnglishPro Critique AI</h1>
               <p className="text-xs text-gray-500">智能口语测评助手</p>
             </div>
           </div>
@@ -115,15 +115,15 @@ function RecordDetailContent() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-10">
-        <div className="mb-6">
-          <h2 className="text-4xl font-extrabold text-slate-900">测评详情</h2>
-          <p className="text-slate-600 mt-2">
+      <main className="max-w-[72rem] mx-auto px-4 py-8">
+        <div className="mb-5">
+          <h2 className="text-[2rem] font-extrabold text-slate-900">测评详情</h2>
+          <p className="mt-2 text-sm text-slate-600">
             学生：{record.result.studentName || "未填写"} · 绘本：{record.result.bookName || "未命名绘本"}
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[0.382fr_0.618fr]">
           <div className="lg:col-span-1 space-y-6">
             <ScoreChart data={record.result} />
           </div>
@@ -131,7 +131,7 @@ function RecordDetailContent() {
             <FeedbackSection
               data={record.result}
               onDataChange={handleDetailDataChange}
-              videoFile={null}
+              videoObjectKey={record.videoObjectKey || null}
               metadata={getMetadata(record.result)}
             />
           </div>
@@ -143,7 +143,7 @@ function RecordDetailContent() {
 
 export default function RecordDetailPage() {
   return (
-    <AuthGate>
+    <AuthGate allowedRoles={["student"]}>
       <RecordDetailContent />
     </AuthGate>
   );

@@ -1,21 +1,31 @@
 "use client";
 
-import Link from "next/link";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useEffect, useState } from "react";
-import { getSessionUser, loginUser } from "@/lib/clientAuth";
+import {
+  getHomePathForRole,
+  getSessionProfile,
+  hasTeacherAccount,
+  loginUser,
+} from "@/lib/clientAuth";
 
 export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [teacherReady, setTeacherReady] = useState(false);
 
   useEffect(() => {
-    if (getSessionUser()) {
-      router.replace("/");
+    const session = getSessionProfile();
+    if (session) {
+      router.replace(getHomePathForRole(session.role));
+      return;
     }
+
+    setTeacherReady(hasTeacherAccount());
   }, [router]);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -29,79 +39,136 @@ export default function LoginPage() {
       return;
     }
 
-    router.replace("/");
+    router.replace(result.data.redirectTo);
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 px-4 py-10 md:py-12 overflow-x-hidden">
-      <div className="max-w-5xl mx-auto origin-top scale-[0.7]">
-        <div className="flex flex-col items-center text-center mb-8 md:mb-10">
-          <div className="h-[115px] w-[115px] mb-5">
-            <Image
-              src="/pixel-logo.png"
-              alt="EnglishPro logo"
-              width={115}
-              height={115}
-              className="h-full w-full object-cover rounded-full shadow-lg"
-              priority
-            />
-          </div>
-          <h1 className="text-4xl md:text-6xl font-bold text-slate-900 tracking-tight">EnglishPro Critique AI</h1>
-          <p className="text-2xl md:text-3xl mt-2 text-slate-600 font-medium">智能口语测评助手登录</p>
-          <p className="text-[20px] mt-3 text-slate-600">
-            为学生提供精准的口语发音、流利度及语调分析，让进步清晰可见。
-          </p>
-        </div>
-
-        <div className="max-w-[38.64rem] mx-auto bg-white rounded-2xl shadow-sm border border-gray-200 p-8 md:p-10">
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div>
-              <label className="block text-xl font-semibold text-slate-700 mb-2">用户名 (Username)</label>
-              <input
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder=""
-              />
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#d7f1ff,_#eff6ff_45%,_#ffffff_80%)] px-4 py-8 md:py-10">
+      <div className="page-shell max-w-5xl">
+        <div className="grid gap-6 lg:grid-cols-[0.618fr_0.382fr] lg:items-center">
+          <section className="rounded-[1.8rem] border border-white/70 bg-white/75 p-6 shadow-[0_30px_70px_rgba(88,136,255,0.1)] backdrop-blur md:p-7">
+            <div className="inline-flex items-center gap-3 rounded-full bg-sky-100 px-4 py-2 text-sm font-semibold text-sky-700">
+              <span className="h-2.5 w-2.5 rounded-full bg-sky-500" />
+              Teacher + Student Portal
             </div>
-
-            <div>
-              <label className="block text-xl font-semibold text-slate-700 mb-2">密码 (Password)</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder=""
-              />
-            </div>
-
-            {error ? (
-              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                {error}
+            <div className="mt-6 flex items-center gap-4">
+              <div className="h-16 w-16 overflow-hidden rounded-[1.4rem] shadow-lg">
+                <Image
+                  src="/pixel-logo.png"
+                  alt="EnglishPro logo"
+                  width={64}
+                  height={64}
+                  className="h-full w-full object-cover"
+                  priority
+                />
               </div>
-            ) : null}
+              <div>
+                <h1 className="text-3xl font-black tracking-tight text-slate-900 md:text-4xl">
+                  EnglishPro
+                </h1>
+                <p className="mt-1.5 text-base text-slate-600 md:text-lg">
+                  学生端测评 + 老师端管理
+                </p>
+              </div>
+            </div>
 
-            <button
-              type="submit"
-              className="w-full py-3 rounded-xl bg-blue-600 text-white text-xl font-semibold hover:bg-blue-700 transition-colors"
-            >
-              登录 (Sign in)
-            </button>
-          </form>
+            <div className="mt-8 grid gap-4 md:grid-cols-2">
+              <div className="rounded-[1.4rem] bg-gradient-to-br from-sky-500 to-cyan-400 p-5 text-white shadow-lg">
+                <p className="text-xs uppercase tracking-[0.24em] text-white/80">
+                  Student
+                </p>
+                <h2 className="mt-2.5 text-xl font-black">学生端</h2>
+                <p className="mt-2.5 text-sm leading-6 text-white/90">
+                  登录后上传口语视频，查看自己的 AI 测评记录与报告详情。
+                </p>
+              </div>
+              <div className="rounded-[1.4rem] bg-gradient-to-br from-indigo-600 to-blue-500 p-5 text-white shadow-lg">
+                <p className="text-xs uppercase tracking-[0.24em] text-white/80">
+                  Teacher
+                </p>
+                <h2 className="mt-2.5 text-xl font-black">老师端</h2>
+                <p className="mt-2.5 text-sm leading-6 text-white/90">
+                  老师可管理学员、班级与账号状态，学生不能自行注册。
+                </p>
+              </div>
+            </div>
+          </section>
 
-          <div className="my-7 flex items-center gap-4 text-gray-500">
-            <div className="h-px bg-gray-300 flex-1" />
-            <span className="text-xl font-medium">没有账号?</span>
-            <div className="h-px bg-gray-300 flex-1" />
-          </div>
+          <section className="rounded-[1.8rem] border border-slate-200 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.06)] md:p-7">
+            <div className="mb-6">
+              <p className="text-sm font-semibold uppercase tracking-[0.28em] text-blue-600">
+                Sign in
+              </p>
+              <h2 className="mt-2.5 text-2xl font-black text-slate-900">账号登录</h2>
+              <p className="mt-3 text-sm leading-6 text-slate-500">
+                学生账号需要由老师端创建后才能登录。老师账号可通过邀请码注册。
+              </p>
+            </div>
 
-          <Link
-            href="/register"
-            className="w-full block text-center py-3 rounded-xl border border-gray-300 text-slate-700 text-xl font-semibold hover:bg-gray-50 transition-colors"
-          >
-            去注册 (Go to Register)
-          </Link>
+            <form onSubmit={handleSubmit} className="space-y-5">
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  账号
+                </label>
+                <input
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white"
+                  placeholder="老师账号或学生账号"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  密码
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white"
+                  placeholder="请输入密码"
+                />
+              </div>
+
+              {error ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {error}
+                </div>
+              ) : null}
+
+              <button
+                type="submit"
+                className="w-full rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+              >
+                进入系统
+              </button>
+            </form>
+
+            <div className="mt-6 rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
+              {teacherReady ? (
+                <p>
+                  需要新增老师账号？
+                  <Link
+                    href="/register"
+                    className="ml-1 font-semibold text-blue-600 hover:text-blue-700"
+                  >
+                    前往老师注册
+                  </Link>
+                </p>
+              ) : (
+                <p>
+                  当前还没有老师账号。
+                  <Link
+                    href="/register"
+                    className="ml-1 font-semibold text-blue-600 hover:text-blue-700"
+                  >
+                    先创建首个老师账号
+                  </Link>
+                </p>
+              )}
+            </div>
+          </section>
         </div>
       </div>
     </div>

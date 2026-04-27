@@ -5,6 +5,7 @@ export interface UserAnalysisRecord {
   username: string;
   createdAt: number;
   result: AnalysisResult;
+  videoObjectKey?: string | null;
 }
 
 const RECORDS_KEY = "ep_analysis_records";
@@ -53,7 +54,11 @@ export const getUserRecordById = (
   return found || null;
 };
 
-export const saveUserRecord = (username: string, result: AnalysisResult) => {
+export const saveUserRecord = (
+  username: string,
+  result: AnalysisResult,
+  videoObjectKey?: string | null
+) => {
   const normalized = username.trim();
   if (!normalized) return;
 
@@ -64,6 +69,7 @@ export const saveUserRecord = (username: string, result: AnalysisResult) => {
     username: normalized,
     createdAt: Date.now(),
     result,
+    videoObjectKey: videoObjectKey || null,
   };
 
   const merged = [newRecord, ...all];
@@ -99,4 +105,13 @@ export const updateUserRecord = (
 
   writeAllRecords(next);
   return true;
+};
+
+export const deleteUserRecords = (username: string) => {
+  const normalized = username.trim();
+  if (!normalized) return;
+
+  writeAllRecords(
+    readAllRecords().filter((record) => record.username !== normalized)
+  );
 };

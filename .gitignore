@@ -25,4 +25,5 @@ out
 *.sln
 *.sw?
 .env.local
+.env.production
 tsconfig.tsbuildinfo

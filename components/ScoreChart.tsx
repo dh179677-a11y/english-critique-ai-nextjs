@@ -44,20 +44,20 @@ const ScoreChart: React.FC<ScoreChartProps> = ({ data }) => {
   ];
 
   return (
-    <div className="w-full h-80 sm:h-96 bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-      <h3 className="text-lg font-semibold text-gray-800 mb-2 text-center">能力维度分析</h3>
+    <div className="w-full h-[19rem] sm:h-[21rem] bg-white rounded-[1.4rem] shadow-sm border border-gray-100 p-4">
+      <h3 className="mb-2 text-base font-semibold text-gray-800 text-center">能力维度分析</h3>
       <ResponsiveContainer width="100%" height="100%">
         <RadarChart cx="50%" cy="50%" outerRadius="70%" data={chartData}>
           <PolarGrid gridType="polygon" />
           <PolarAngleAxis 
             dataKey="subject" 
-            tick={{ fill: '#374151', fontSize: 13, fontWeight: 500 }} 
+            tick={{ fill: '#374151', fontSize: 11, fontWeight: 500 }} 
           />
           <PolarRadiusAxis 
             angle={90} 
             domain={[0, 100]} 
             tickCount={6}
-            tick={{ fill: '#9CA3AF', fontSize: 10 }}
+            tick={{ fill: '#9CA3AF', fontSize: 9 }}
           />
           <Radar
             name="Score"
@@ -72,7 +72,7 @@ const ScoreChart: React.FC<ScoreChartProps> = ({ data }) => {
   formatter={(value) => {
     const v = typeof value === "number" ? value : Number(value);
     const display = Number.isFinite(v) ? `${v}` : "-";
-  return [display, "得分"] as [string, string];
+    return [display, "得分"];
   }}
 />
         </RadarChart>

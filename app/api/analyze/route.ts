@@ -1,39 +1,40 @@
 import { NextResponse } from "next/server";
 import { analyzeStudentVideo, VideoMetadata } from "@/lib/gemini";
+import { createSignedDownloadUrl } from "@/lib/cos";
 
 export const runtime = "nodejs";
 
-const getStringValue = (value: FormDataEntryValue | null) => {
+type AnalyzeRequestBody = {
+  objectKey?: string;
+  studentName?: string;
+  bookName?: string;
+  homeworkType?: string;
+  tutorName?: string;
+};
+
+const getStringValue = (value: unknown) => {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed || undefined;
 };
 
-const fileToDataUrl = async (file: File) => {
-  const mimeType = file.type || "video/mp4";
-  const arrayBuffer = await file.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString("base64");
-  return `data:${mimeType};base64,${base64}`;
-};
-
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
-    const video = formData.get("video");
+    const body = (await request.json()) as AnalyzeRequestBody;
+    const objectKey = getStringValue(body.objectKey);
 
-    if (!(video instanceof File)) {
-      return NextResponse.json({ error: "video file is required" }, { status: 400 });
+    if (!objectKey) {
+      return NextResponse.json({ error: "objectKey is required" }, { status: 400 });
     }
 
-    const videoSource = await fileToDataUrl(video);
-
     const metadata: VideoMetadata = {
-      studentName: getStringValue(formData.get("studentName")),
-      bookName: getStringValue(formData.get("bookName")),
-      homeworkType: getStringValue(formData.get("homeworkType")),
-      tutorName: getStringValue(formData.get("tutorName")),
+      studentName: getStringValue(body.studentName),
+      bookName: getStringValue(body.bookName),
+      homeworkType: getStringValue(body.homeworkType),
+      tutorName: getStringValue(body.tutorName),
     };
 
+    const videoSource = createSignedDownloadUrl(objectKey);
     const result = await analyzeStudentVideo(videoSource, metadata);
 
     return NextResponse.json(result);
