@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useEffect, useState } from "react";
@@ -53,13 +52,12 @@ export default function LoginPage() {
             </div>
             <div className="mt-6 flex items-center gap-4">
               <div className="h-16 w-16 overflow-hidden rounded-[1.4rem] shadow-lg">
-                <Image
+                <img
                   src="/pixel-logo.png"
                   alt="EnglishPro logo"
                   width={64}
                   height={64}
                   className="h-full w-full object-cover"
-                  priority
                 />
               </div>
               <div>

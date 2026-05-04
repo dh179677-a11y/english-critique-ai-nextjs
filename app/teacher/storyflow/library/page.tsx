@@ -29,6 +29,33 @@ const formatTime = (timestamp: number) =>
     minute: "2-digit",
   }).format(new Date(timestamp));
 
+const fetchStoryflowUrls = async (objectKeys: string[]) => {
+  const response = await fetch("/api/storyflow/urls", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ objectKeys }),
+  });
+
+  const payload = (await response.json()) as
+    | { urls: Record<string, string> }
+    | { error: string };
+
+  if (!response.ok || "error" in payload) {
+    throw new Error("error" in payload ? payload.error : "地址生成失败");
+  }
+
+  return payload.urls;
+};
+
+const isDisplayUrl = (value?: string | null) =>
+  typeof value === "string" &&
+  (value.startsWith("data:") ||
+    value.startsWith("blob:") ||
+    value.startsWith("http://") ||
+    value.startsWith("https://"));
+
 function TeacherStoryflowLibraryContent() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [documents, setDocuments] = useState<StoryflowDocument[]>([]);
@@ -38,6 +65,7 @@ function TeacherStoryflowLibraryContent() {
   const [sortMode, setSortMode] = useState<SortMode>("manual");
   const [newFolderName, setNewFolderName] = useState("");
   const [categoryDrafts, setCategoryDrafts] = useState<Record<string, string>>({});
+  const [coverUrls, setCoverUrls] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -61,6 +89,39 @@ function TeacherStoryflowLibraryContent() {
       nextDrafts[item.id] = item.category || "";
     });
     setCategoryDrafts(nextDrafts);
+  }, [documents]);
+
+  useEffect(() => {
+    const objectKeys = Array.from(
+      new Set(
+        documents
+          .map((item) => item.pageObjectKeys?.[0] || item.thumbnailObjectKey || "")
+          .filter(Boolean)
+      )
+    );
+
+    if (!objectKeys.length) {
+      setCoverUrls({});
+      return;
+    }
+
+    let disposed = false;
+
+    void fetchStoryflowUrls(objectKeys)
+      .then((urls) => {
+        if (!disposed) {
+          setCoverUrls(urls);
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setCoverUrls({});
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, [documents]);
 
   const folderCountById = useMemo(() => {
@@ -445,6 +506,11 @@ function TeacherStoryflowLibraryContent() {
               filteredDocuments.map((item, index) => {
                 const folderName =
                   folders.find((folder) => folder.id === item.folderId)?.name || "根目录";
+                const coverObjectKey = item.pageObjectKeys?.[0] || item.thumbnailObjectKey || "";
+                const coverUrl =
+                  (isDisplayUrl(item.images?.[0]) ? item.images?.[0] || "" : "") ||
+                  (isDisplayUrl(item.thumbnail) ? item.thumbnail : "") ||
+                  (coverObjectKey ? coverUrls[coverObjectKey] || "" : "");
 
                 return (
                   <article
@@ -452,9 +518,9 @@ function TeacherStoryflowLibraryContent() {
                     className="rounded-[1.7rem] border border-white/80 bg-white p-4 shadow-[0_18px_50px_rgba(148,163,184,0.12)]"
                   >
                     <div className="flex gap-3">
-                      {item.thumbnail ? (
+                      {coverUrl ? (
                         <img
-                          src={item.thumbnail}
+                          src={coverUrl}
                           alt={item.analysis.title}
                           className="h-24 w-24 rounded-[1.3rem] object-cover"
                         />

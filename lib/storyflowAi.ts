@@ -149,6 +149,8 @@ const ensurePageArray = (value: unknown): StoryflowPageAnalysis[] => {
         typeof page.storyBeat === "string" ? page.storyBeat.trim() : "",
       visibleText:
         typeof page.visibleText === "string" ? page.visibleText.trim() : "",
+      clozeHint:
+        typeof page.clozeHint === "string" ? page.clozeHint.trim() : "",
       bilingualHint:
         typeof page.bilingualHint === "string" ? page.bilingualHint.trim() : "",
       speakingPrompt: ensureStringArray(page.speakingPrompt, []),
@@ -657,6 +659,7 @@ ${mergedSummaryZh}
         pageTitle: normalized ? `Page ${index + 1}` : `第 ${index + 1} 页`,
         storyBeat: normalized,
         visibleText: normalized,
+        clozeHint: "",
         bilingualHint: "先观察画面，再根据原文完整复述。",
         speakingPrompt: [
           "画面中有谁？",

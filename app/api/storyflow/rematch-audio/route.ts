@@ -12,8 +12,17 @@ type TrackInput = {
   durationSec: number;
 };
 
+type AudioSegmentSlot = "single" | "left" | "right";
+
+type PageEntryInput = {
+  pageIndex: number;
+  slot: AudioSegmentSlot;
+  text: string;
+};
+
 type RematchRequest = {
   pageTexts?: unknown;
+  pageEntries?: unknown;
   tracks?: unknown;
 };
 
@@ -25,6 +34,7 @@ type TranscriptToken = {
 
 type MatchResult = {
   pageIndex: number;
+  slot: AudioSegmentSlot;
   trackIndex: number;
   startSec: number;
   endSec: number;
@@ -34,12 +44,17 @@ type MatchResult = {
 
 type TrackPageAssignment = {
   trackIndex: number;
-  pageIndexes: number[];
+  entries: PageEntryInput[];
 };
 
-const MATCH_LEAD_PADDING_SEC = 0.06;
+const MATCH_LEAD_PADDING_SEC = 0;
 const MATCH_TAIL_PADDING_SEC = 0.34;
 const SHORT_MATCH_TAIL_PADDING_SEC = 0.46;
+const AUDIO_SLOT_ORDER: Record<AudioSegmentSlot, number> = {
+  single: 0,
+  left: 1,
+  right: 2,
+};
 
 const getRequiredEnv = (name: string) => {
   const value = process.env[name]?.trim();
@@ -71,6 +86,9 @@ const tokenize = (value: string) =>
 const toNumber = (value: unknown, fallback = 0) =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
+const normalizeAudioSegmentSlot = (value: unknown): AudioSegmentSlot =>
+  value === "left" || value === "right" || value === "single" ? value : "single";
+
 const parseTracks = (value: unknown): TrackInput[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -90,6 +108,30 @@ const parseTracks = (value: unknown): TrackInput[] => {
       objectKey: item.objectKey,
       durationSec: toNumber(item.durationSec, 0),
     }));
+};
+
+const parsePageEntries = (value: unknown): PageEntryInput[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => item as Partial<PageEntryInput>)
+    .filter(
+      (item): item is PageEntryInput =>
+        typeof item?.pageIndex === "number" &&
+        Number.isFinite(item.pageIndex) &&
+        item.pageIndex >= 0 &&
+        typeof item?.text === "string"
+    )
+    .map((item) => ({
+      pageIndex: item.pageIndex,
+      slot: normalizeAudioSegmentSlot(item.slot),
+      text: item.text.trim(),
+    }))
+    .filter((item) => item.text.length > 0)
+    .sort((left, right) =>
+      left.pageIndex === right.pageIndex
+        ? AUDIO_SLOT_ORDER[left.slot] - AUDIO_SLOT_ORDER[right.slot]
+        : left.pageIndex - right.pageIndex
+    );
 };
 
 const parsePageRangeHintFromFileName = (fileName: string, pageCount: number) => {
@@ -277,43 +319,51 @@ const transcribeTrack = async (
 };
 
 const assignPagesToTracks = (
-  pageTexts: string[],
+  pageEntries: PageEntryInput[],
   tracks: TrackInput[]
 ): TrackPageAssignment[] => {
+  const pageCount = pageEntries.reduce((max, item) => Math.max(max, item.pageIndex + 1), 0);
   const assignments = tracks.map((_, trackIndex) => ({
     trackIndex,
-    pageIndexes: [] as number[],
+    entries: [] as PageEntryInput[],
   }));
 
-  const nonEmptyPageIndexes = pageTexts
-    .map((text, pageIndex) => ({ pageIndex, text: text.trim() }))
-    .filter((item) => item.text.length > 0)
-    .map((item) => item.pageIndex);
-
   if (tracks.length === 1) {
-    assignments[0].pageIndexes.push(...nonEmptyPageIndexes);
+    assignments[0].entries.push(...pageEntries);
     return assignments;
   }
 
-  const assignedPages = new Set<number>();
+  const entriesByPage = new Map<number, PageEntryInput[]>();
+  pageEntries.forEach((entry) => {
+    const group = entriesByPage.get(entry.pageIndex) || [];
+    group.push(entry);
+    entriesByPage.set(entry.pageIndex, group);
+  });
+
+  const assignedEntryKeys = new Set<string>();
   const unhintedTrackIndexes: number[] = [];
 
   tracks.forEach((track, trackIndex) => {
-    const pageHint = parsePageIndexHintFromFileName(track.fileName, pageTexts.length);
+    const pageHint = parsePageIndexHintFromFileName(track.fileName, pageCount);
     if (pageHint !== null) {
-      if (pageTexts[pageHint]?.trim()) {
-        assignments[trackIndex].pageIndexes.push(pageHint);
-        assignedPages.add(pageHint);
+      const entries = entriesByPage.get(pageHint) || [];
+      if (entries.length) {
+        assignments[trackIndex].entries.push(...entries);
+        entries.forEach((entry) => assignedEntryKeys.add(`${entry.pageIndex}:${entry.slot}`));
       }
       return;
     }
 
-    const rangeHint = parsePageRangeHintFromFileName(track.fileName, pageTexts.length);
+    const rangeHint = parsePageRangeHintFromFileName(track.fileName, pageCount);
     if (rangeHint) {
       for (let pageIndex = rangeHint.startPageIndex; pageIndex <= rangeHint.endPageIndex; pageIndex += 1) {
-        if (assignedPages.has(pageIndex) || !pageTexts[pageIndex]?.trim()) continue;
-        assignments[trackIndex].pageIndexes.push(pageIndex);
-        assignedPages.add(pageIndex);
+        const entries = entriesByPage.get(pageIndex) || [];
+        entries.forEach((entry) => {
+          const entryKey = `${entry.pageIndex}:${entry.slot}`;
+          if (assignedEntryKeys.has(entryKey)) return;
+          assignments[trackIndex].entries.push(entry);
+          assignedEntryKeys.add(entryKey);
+        });
       }
       return;
     }
@@ -321,15 +371,17 @@ const assignPagesToTracks = (
     unhintedTrackIndexes.push(trackIndex);
   });
 
-  const remainingPages = nonEmptyPageIndexes.filter((pageIndex) => !assignedPages.has(pageIndex));
+  const remainingEntries = pageEntries.filter(
+    (entry) => !assignedEntryKeys.has(`${entry.pageIndex}:${entry.slot}`)
+  );
 
-  if (!remainingPages.length || !unhintedTrackIndexes.length) {
+  if (!remainingEntries.length || !unhintedTrackIndexes.length) {
     return assignments;
   }
 
-  const pairCount = Math.min(unhintedTrackIndexes.length, remainingPages.length);
+  const pairCount = Math.min(unhintedTrackIndexes.length, remainingEntries.length);
   for (let index = 0; index < pairCount; index += 1) {
-    assignments[unhintedTrackIndexes[index]].pageIndexes.push(remainingPages[index]);
+    assignments[unhintedTrackIndexes[index]].entries.push(remainingEntries[index]);
   }
 
   return assignments;
@@ -337,6 +389,7 @@ const assignPagesToTracks = (
 
 const buildTrackWideFallbackMatch = (
   pageIndex: number,
+  slot: AudioSegmentSlot,
   trackIndex: number,
   targetTokens: string[],
   tokens: TranscriptToken[]
@@ -354,6 +407,7 @@ const buildTrackWideFallbackMatch = (
 
   return {
     pageIndex,
+    slot,
     trackIndex,
     startSec,
     endSec,
@@ -365,6 +419,7 @@ const buildTrackWideFallbackMatch = (
 const buildMatchPayload = (
   trackIndex: number,
   pageIndex: number,
+  slot: AudioSegmentSlot,
   targetTokens: string[],
   matchedTokens: TranscriptToken[]
 ): MatchResult => {
@@ -378,6 +433,7 @@ const buildMatchPayload = (
 
   return {
     pageIndex,
+    slot,
     trackIndex,
     startSec: Math.max(0, matchedTokens[0].startSec - leadPadding),
     endSec: Math.max(
@@ -444,8 +500,83 @@ const findExactPhraseMatch = (
   return null;
 };
 
+const findFuzzyPhraseMatch = (
+  tokens: TranscriptToken[],
+  fromIndex: number,
+  targetTokens: string[]
+) => {
+  if (!targetTokens.length) return null;
+
+  const maxStartLookahead = Math.min(72, Math.max(0, tokens.length - fromIndex));
+  let best:
+    | {
+        startIndex: number;
+        endIndex: number;
+        score: number;
+      }
+    | null = null;
+
+  for (
+    let startIndex = fromIndex;
+    startIndex < tokens.length && startIndex < fromIndex + maxStartLookahead;
+    startIndex += 1
+  ) {
+    const maxWindowLength = Math.min(
+      Math.max(targetTokens.length + 6, targetTokens.length * 2),
+      tokens.length - startIndex
+    );
+
+    for (let windowLength = Math.max(1, targetTokens.length - 1); windowLength <= maxWindowLength; windowLength += 1) {
+      const candidateTokens = tokens
+        .slice(startIndex, startIndex + windowLength)
+        .map((item) => normalizeText(item.text))
+        .filter(Boolean);
+
+      if (!candidateTokens.length) continue;
+
+      let targetCursor = 0;
+      let matchedInOrder = 0;
+      candidateTokens.forEach((token) => {
+        while (targetCursor < targetTokens.length) {
+          if (targetTokens[targetCursor] === token) {
+            matchedInOrder += 1;
+            targetCursor += 1;
+            break;
+          }
+          targetCursor += 1;
+        }
+      });
+
+      const overlapSet = new Set(candidateTokens);
+      const overlapCount = targetTokens.filter((token) => overlapSet.has(token)).length;
+      const orderScore = matchedInOrder / targetTokens.length;
+      const overlapScore = overlapCount / targetTokens.length;
+      const lengthPenalty =
+        Math.abs(candidateTokens.length - targetTokens.length) /
+        Math.max(targetTokens.length, candidateTokens.length, 1);
+      const candidateScore = orderScore * 0.72 + overlapScore * 0.38 - lengthPenalty * 0.18;
+
+      if (candidateScore < 0.58) continue;
+
+      if (
+        !best ||
+        candidateScore > best.score ||
+        (Math.abs(candidateScore - best.score) < 0.001 && startIndex < best.startIndex)
+      ) {
+        best = {
+          startIndex,
+          endIndex: startIndex + candidateTokens.length - 1,
+          score: candidateScore,
+        };
+      }
+    }
+  }
+
+  return best;
+};
+
 const alignPagesWithinTrack = (
-  pageEntries: Array<{ pageIndex: number; text: string }>,
+  pageEntries: PageEntryInput[],
   tokens: TranscriptToken[],
   trackIndex: number
 ) => {
@@ -454,6 +585,7 @@ const alignPagesWithinTrack = (
     const targetTokens = tokenize(pageEntries[0].text);
     const fallbackMatch = buildTrackWideFallbackMatch(
       pageEntries[0].pageIndex,
+      pageEntries[0].slot,
       trackIndex,
       targetTokens,
       tokens
@@ -475,12 +607,21 @@ const alignPagesWithinTrack = (
         : findExactPhraseMatch(tokens, cursor, targetTokens);
 
     if (!exactRange) {
+      const fuzzyRange = findFuzzyPhraseMatch(tokens, cursor, targetTokens);
+      if (!fuzzyRange) {
+        return;
+      }
+      const matchedTokens = tokens.slice(fuzzyRange.startIndex, fuzzyRange.endIndex + 1);
+      matches.push(
+        buildMatchPayload(trackIndex, page.pageIndex, page.slot, targetTokens, matchedTokens)
+      );
+      cursor = fuzzyRange.endIndex + 1;
       return;
     }
 
     const matchedTokens = tokens.slice(exactRange.startIndex, exactRange.endIndex + 1);
     matches.push(
-      buildMatchPayload(trackIndex, page.pageIndex, targetTokens, matchedTokens)
+      buildMatchPayload(trackIndex, page.pageIndex, page.slot, targetTokens, matchedTokens)
     );
     cursor = exactRange.endIndex + 1;
   });
@@ -489,29 +630,24 @@ const alignPagesWithinTrack = (
 };
 
 const alignPagesToTracks = (
-  pageTexts: string[],
+  pageEntries: PageEntryInput[],
   allTrackTokens: TranscriptToken[][],
   tracks: TrackInput[]
 ) => {
   const matches: MatchResult[] = [];
-  const assignments = assignPagesToTracks(pageTexts, tracks);
+  const assignments = assignPagesToTracks(pageEntries, tracks);
 
-  assignments.forEach(({ trackIndex, pageIndexes }) => {
+  assignments.forEach(({ trackIndex, entries }) => {
     const tokens = allTrackTokens[trackIndex] || [];
-    if (!tokens.length || !pageIndexes.length) return;
-
-    const pageEntries = pageIndexes
-      .map((pageIndex) => ({
-        pageIndex,
-        text: pageTexts[pageIndex]?.trim() || "",
-      }))
-      .filter((item) => item.text.length > 0);
-
-    if (!pageEntries.length) return;
-    matches.push(...alignPagesWithinTrack(pageEntries, tokens, trackIndex));
+    if (!tokens.length || !entries.length) return;
+    matches.push(...alignPagesWithinTrack(entries, tokens, trackIndex));
   });
 
-  return matches.sort((left, right) => left.pageIndex - right.pageIndex);
+  return matches.sort((left, right) =>
+    left.pageIndex === right.pageIndex
+      ? AUDIO_SLOT_ORDER[left.slot] - AUDIO_SLOT_ORDER[right.slot]
+      : left.pageIndex - right.pageIndex
+  );
 };
 
 export async function POST(request: Request) {
@@ -520,11 +656,24 @@ export async function POST(request: Request) {
     const pageTexts = Array.isArray(body.pageTexts)
       ? body.pageTexts.map((item) => (typeof item === "string" ? item.trim() : ""))
       : [];
+    const pageEntries =
+      parsePageEntries(body.pageEntries) ||
+      [];
     const tracks = parseTracks(body.tracks);
 
-    if (!pageTexts.length || !tracks.length) {
+    const effectivePageEntries = pageEntries.length
+      ? pageEntries
+      : pageTexts
+          .map((text, pageIndex) => ({
+            pageIndex,
+            slot: "single" as const,
+            text: text.trim(),
+          }))
+          .filter((item) => item.text.length > 0);
+
+    if (!effectivePageEntries.length || !tracks.length) {
       return NextResponse.json(
-        { error: "pageTexts and tracks are required" },
+        { error: "pageEntries/pageTexts and tracks are required" },
         { status: 400 }
       );
     }
@@ -537,7 +686,7 @@ export async function POST(request: Request) {
       allTrackTokens.push(tokens);
     }
 
-    const matches = alignPagesToTracks(pageTexts, allTrackTokens, tracks);
+    const matches = alignPagesToTracks(effectivePageEntries, allTrackTokens, tracks);
     const diagnostics = {
       tracks: tracks.map((track, trackIndex) => ({
         trackIndex,
@@ -553,11 +702,15 @@ export async function POST(request: Request) {
           .join(" ")
           .trim(),
       })),
-      pages: pageTexts.map((text, pageIndex) => {
-        const match = matches.find((item) => item.pageIndex === pageIndex) || null;
+      pages: effectivePageEntries.map((entry) => {
+        const match =
+          matches.find(
+            (item) => item.pageIndex === entry.pageIndex && item.slot === entry.slot
+          ) || null;
         return {
-          pageIndex,
-          pageText: text,
+          pageIndex: entry.pageIndex,
+          slot: entry.slot,
+          pageText: entry.text,
           matchedTrackIndex: match?.trackIndex ?? null,
           matchedTrackFileName:
             typeof match?.trackIndex === "number"
@@ -575,7 +728,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       matches,
       matchedCount: matches.length,
-      totalPages: pageTexts.filter((text) => text.trim().length > 0).length,
+      totalPages: effectivePageEntries.length,
       diagnostics,
     });
   } catch (error) {

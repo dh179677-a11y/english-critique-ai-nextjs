@@ -6,7 +6,7 @@ import { AppStatus, AnalysisResult } from './types';
 import { analyzeStudentVideo, VideoMetadata } from './services/geminiService';
 import ScoreChart from './components/ScoreChart';
 import FeedbackSection from './components/FeedbackSection';
-import { getSessionProfile } from './lib/clientAuth';
+import { clearSessionUser, getSessionProfile } from './lib/clientAuth';
 import { saveUserRecord } from './lib/clientRecords';
 import { getStudentStoryflowAssignments } from './lib/storyflowAssignments';
 
@@ -103,6 +103,11 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
     setResult(newData);
   };
 
+  const handleLogout = () => {
+    clearSessionUser();
+    window.location.href = '/login';
+  };
+
   const getMetadata = (): VideoMetadata => ({
     studentName,
     bookName,
@@ -142,17 +147,17 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
               </Link>
             ) : null}
             <Link
-              href="/tasks"
-              className="text-sm font-medium text-gray-600 transition-colors hover:text-blue-600"
-            >
-              任务入口
-            </Link>
-            <Link
               href="/records"
               className="text-sm font-medium text-gray-600 transition-colors hover:text-blue-600"
             >
               我的测评记录
             </Link>
+            <button
+              onClick={handleLogout}
+              className="text-sm font-medium text-gray-600 transition-colors hover:text-blue-600"
+            >
+              退出登录
+            </button>
             {mode === 'upload' && status !== AppStatus.IDLE ? (
               <button
                 onClick={handleReset}

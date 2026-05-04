@@ -32,6 +32,11 @@ const getModel = () => {
   return process.env.LLM_MODEL || "gemini-3-pro-preview";
 };
 
+const sleep = (ms: number) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 const normalizeVideoSource = (videoSource: string): string => {
   if (videoSource.startsWith("data:video/")) {
     return videoSource;
@@ -138,6 +143,59 @@ const createVideoChatCompletion = async (
       } as never);
     } catch (error) {
       lastError = error;
+    }
+  }
+
+  throw lastError;
+};
+
+const isRetryableAiError = (error: unknown) => {
+  if (!error || typeof error !== "object") return false;
+
+  const record = error as {
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+    error?: unknown;
+  };
+  const nested = record.error && typeof record.error === "object" ? (record.error as { message?: unknown }) : null;
+  const message = [
+    typeof record.message === "string" ? record.message : "",
+    typeof nested?.message === "string" ? nested.message : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    record.status === 429 ||
+    record.code === "429" ||
+    message.includes("429") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("overloaded") ||
+    message.includes("负载已饱和") ||
+    message.includes("上游负载")
+  );
+};
+
+const createVideoChatCompletionWithRetry = async (
+  ai: OpenAI,
+  prompt: string,
+  videoUrl: string,
+  options?: { responseFormat?: "json_object"; temperature?: number }
+) => {
+  const delays = [1200, 2500, 4500];
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      return await createVideoChatCompletion(ai, prompt, videoUrl, options);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableAiError(error) || attempt === delays.length) {
+        throw error;
+      }
+      await sleep(delays[attempt]);
     }
   }
 
@@ -358,6 +416,17 @@ const getErrorDebugMessage = (error: unknown): string => {
 const normalizeAiErrorMessage = (message: string): string => {
   const normalized = message.trim();
   const lower = normalized.toLowerCase();
+
+  if (
+    lower.includes("429") ||
+    lower.includes("rate limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("当前分组上游负载已饱和") ||
+    lower.includes("负载已饱和") ||
+    lower.includes("上游负载")
+  ) {
+    return "视频分析服务当前繁忙，系统已自动重试；若仍失败，请稍后 1-2 分钟再试。";
+  }
 
   if (
     lower.includes("not implemented") ||
@@ -592,7 +661,7 @@ export const analyzeStudentVideo = async (
   try {
     const ai = getAiClient();
     const prompt = buildAnalyzePrompt(metadata);
-    const response = await createVideoChatCompletion(ai, prompt, videoUrl, {
+    const response = await createVideoChatCompletionWithRetry(ai, prompt, videoUrl, {
       responseFormat: "json_object",
       temperature: 0.2,
     });
@@ -657,7 +726,7 @@ export const regenerateFeedbackSection = async (
   try {
     const ai = getAiClient();
     const prompt = buildRegeneratePrompt(sectionType, metadata);
-    const response = await createVideoChatCompletion(ai, prompt, videoUrl, {
+    const response = await createVideoChatCompletionWithRetry(ai, prompt, videoUrl, {
       temperature: 0.4,
     });
 

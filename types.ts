@@ -14,6 +14,7 @@ export interface AnalysisResult {
   vocabulary: AssessmentCriteria;
   emotion: AssessmentCriteria;
   overallComment: string;
+  simpleComment?: string;
   suggestions: string[];
   grammarSummary?: string;
 }

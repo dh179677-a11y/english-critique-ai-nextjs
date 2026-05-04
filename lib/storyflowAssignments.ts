@@ -78,6 +78,7 @@ const normalizeAnalysisResult = (value: unknown): AnalysisResult | null => {
     vocabulary: normalizeCriteria(item.vocabulary),
     emotion: normalizeCriteria(item.emotion),
     overallComment: normalizeText(item.overallComment),
+    simpleComment: normalizeText(item.simpleComment),
     suggestions: Array.isArray(item.suggestions)
       ? item.suggestions.map((suggestion) => normalizeText(suggestion)).filter(Boolean)
       : [],

@@ -13,8 +13,6 @@ type StoryflowAnalyzeRequest = {
   providedShadowPageTexts?: unknown;
 };
 
-const MAX_FULL_ANALYZE_IMAGES = 8;
-
 const getString = (value: unknown) =>
   typeof value === "string" ? value.trim() : "";
 
@@ -214,12 +212,8 @@ const extractCharacters = (pageTexts: string[]) => {
     .map(([name]) => name);
 };
 
-const buildPages = (
-  pageTexts: string[],
-  previewCount: number
-): StoryflowPageAnalysis[] => {
-  const count = Math.max(0, Math.min(previewCount, pageTexts.length));
-  return Array.from({ length: count }, (_, index) => {
+const buildPages = (pageTexts: string[]): StoryflowPageAnalysis[] => {
+  return Array.from({ length: pageTexts.length }, (_, index) => {
     const visibleText = normalizeText(pageTexts[index] || "");
     const words = visibleText
       .split(/[^A-Za-z']+/)
@@ -232,6 +226,7 @@ const buildPages = (
       pageTitle: `Page ${index + 1}`,
       storyBeat: visibleText,
       visibleText,
+      clozeHint: "",
       bilingualHint: "请先观察图片，再根据原文复述。",
       speakingPrompt: [
         "Who is in this page?",
@@ -245,8 +240,7 @@ const buildPages = (
 
 const buildRuleBasedAnalysis = (
   sourceName: string,
-  pageTexts: string[],
-  previewCount: number
+  pageTexts: string[]
 ): StoryflowAnalysis => {
   const cleaned = pageTexts.map((item) => normalizeText(item));
   const nonEmpty = cleaned.filter(Boolean);
@@ -280,7 +274,7 @@ const buildRuleBasedAnalysis = (
       ],
       end: [takeWords(end || middle || first || title, 12) || "Story ends."],
     },
-    pages: buildPages(cleaned, previewCount),
+    pages: buildPages(cleaned),
     shadowPageTexts: cleaned,
     keywords: safeKeywords,
     teacherGuide: [],
@@ -376,24 +370,16 @@ export async function POST(request: Request) {
     const seededCoverTitle = sourceName || "";
     const normalizedTextsWithCover = enforceCoverAsTitle(normalizedTexts, seededCoverTitle);
 
-    const previewCount = previewImages.length || Math.min(6, totalPages);
     let mergedTexts = [...normalizedTextsWithCover];
     let fallbackResult = buildRuleBasedAnalysis(
       sourceName,
-      mergedTexts,
-      previewCount
+      mergedTexts
     );
     let aiResult: StoryflowAnalysis | null = null;
     if (images.length) {
       try {
-        const analyzeInputs =
-          images.length > MAX_FULL_ANALYZE_IMAGES
-            ? previewImages.length
-              ? previewImages
-              : images.slice(0, MAX_FULL_ANALYZE_IMAGES)
-            : images;
         aiResult = await withTimeout(
-          analyzeStoryImages(analyzeInputs, sourceName, previewImages),
+          analyzeStoryImages(images, sourceName, previewImages),
           Number(process.env.STORYFLOW_ANALYZE_TIMEOUT_MS || 300000)
         );
       } catch (aiError) {
@@ -411,8 +397,7 @@ export async function POST(request: Request) {
       });
       fallbackResult = buildRuleBasedAnalysis(
         sourceName,
-        mergedTexts,
-        previewCount
+        mergedTexts
       );
     }
 
@@ -422,7 +407,7 @@ export async function POST(request: Request) {
       sourceName ||
       "";
     mergedTexts = enforceCoverAsTitle(mergedTexts, finalCoverTitle);
-    fallbackResult = buildRuleBasedAnalysis(sourceName, mergedTexts, previewCount);
+    fallbackResult = buildRuleBasedAnalysis(sourceName, mergedTexts);
 
     const mergedSetting = {
       time:
@@ -468,7 +453,7 @@ export async function POST(request: Request) {
           : fallbackResult.characters,
       setting: mergedSetting,
       mindMap: mergedMindMap,
-      pages: buildPages(mergedTexts, previewCount),
+      pages: buildPages(mergedTexts),
       shadowPageTexts: mergedTexts,
       keywords: mergedKeywords,
       teacherGuide:

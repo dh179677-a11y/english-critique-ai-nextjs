@@ -10,6 +10,7 @@ import {
   getTeacherStoryflowDocuments,
   type StoryflowAnalysis,
   type StoryflowCustomView,
+  type StoryflowPageAudioSegmentSlot,
   type StoryflowSpeakingPracticeRecord,
   updateTeacherStoryflowDocument,
 } from "@/lib/storyflowStore";
@@ -45,6 +46,7 @@ type ShadowRecordingClip = {
 
 type PracticeAudioUnit = {
   pageIndex: number;
+  slot: StoryflowPageAudioSegmentSlot;
   text: string;
   url: string;
   startSec: number;
@@ -71,6 +73,9 @@ type ShadowNavigationStep = {
   focus: 0 | 1;
   pageIndex: number;
 };
+
+const normalizeStudentAudioSlot = (value: unknown): StoryflowPageAudioSegmentSlot =>
+  value === "left" || value === "right" ? value : "single";
 
 const SPEAKING_STOP_WORDS = new Set([
   "a",
@@ -104,6 +109,49 @@ const normalizeStoryText = (value: string) =>
     .replace(/\s+/g, " ")
     .replace(/\s([,.;:!?])/g, "$1")
     .trim();
+
+const splitDualPageText = (value: string) => {
+  const normalized = value.replace(/\r\n?/g, "\n");
+  const markerMatch = normalized.match(/\[RIGHT_PAGE\]/i);
+  if (markerMatch && typeof markerMatch.index === "number") {
+    return {
+      leftText: normalized.slice(0, markerMatch.index).trim(),
+      rightText: normalized
+        .slice(markerMatch.index + markerMatch[0].length)
+        .trim(),
+    };
+  }
+
+  const blankLineDivider = normalized.split(/\n\s*\n/);
+  if (blankLineDivider.length >= 2) {
+    return {
+      leftText: blankLineDivider[0].trim(),
+      rightText: blankLineDivider.slice(1).join("\n\n").trim(),
+    };
+  }
+
+  return {
+    leftText: normalized.trim(),
+    rightText: "",
+  };
+};
+
+const joinDualPageText = (leftText: string, rightText: string) => {
+  const safeLeft = leftText.trim();
+  const safeRight = rightText.trim();
+  if (safeLeft && safeRight) {
+    return `${safeLeft}\n\n[RIGHT_PAGE]\n${safeRight}`;
+  }
+  return safeLeft || safeRight;
+};
+
+const getShadowStepText = (rawText: string, focus: 0 | 1) => {
+  const { leftText, rightText } = splitDualPageText(rawText);
+  if (rightText) {
+    return (focus === 0 ? leftText : rightText).trim();
+  }
+  return leftText.trim();
+};
 
 const mergeStoryTextSegments = (segments: Array<string | null | undefined>) => {
   const seen = new Set<string>();
@@ -319,7 +367,7 @@ const buildStudentPracticePages = (
     pageGroups.set(page.pageIndex, group);
   });
   const maxPageIndex = previousPages.reduce((max, page) => Math.max(max, page.pageIndex + 1), 0);
-  const targetCount = Math.max(maxPageIndex, shadowTexts.length, 1);
+  const targetCount = Math.max(maxPageIndex, shadowTexts.length, pageObjectKeys.length, 1);
   const normalizedPages = Array.from({ length: targetCount }, (_, index) => {
     const previousGroup = pageGroups.get(index) || [];
     const previous = previousGroup[0];
@@ -342,26 +390,12 @@ const buildStudentPracticePages = (
       keyVocabulary: Array.from(new Set(words)).slice(0, 6),
       sourcePageIndexes: [index],
     } satisfies StudentPracticePage;
-  }).filter((page) => page.visibleText);
-
-  const mergedPages: StudentPracticePage[] = [];
-  normalizedPages.forEach((page) => {
+  }).filter((page) => {
     const pageObjectKey = pageObjectKeys[page.pageIndex] || "";
-    const lastPage = mergedPages[mergedPages.length - 1];
-    const lastPageObjectKey = lastPage ? pageObjectKeys[lastPage.pageIndex] || "" : "";
-    if (lastPage && pageObjectKey && lastPageObjectKey && pageObjectKey === lastPageObjectKey) {
-      lastPage.sourcePageIndexes.push(page.pageIndex);
-      lastPage.visibleText = mergeStoryTextSegments([lastPage.visibleText, page.visibleText]);
-      lastPage.storyBeat = lastPage.visibleText;
-      lastPage.keyVocabulary = Array.from(
-        new Set([...lastPage.keyVocabulary, ...page.keyVocabulary])
-      ).slice(0, 8);
-      return;
-    }
-    mergedPages.push(page);
+    return Boolean(page.visibleText || pageObjectKey);
   });
 
-  return mergedPages;
+  return normalizedPages;
 };
 
 const scoreSpeakingPractice = ({
@@ -478,6 +512,13 @@ const fetchStoryflowUrls = async (objectKeys: string[]) => {
 
   return payload.urls;
 };
+
+const isDisplayUrl = (value?: string | null) =>
+  typeof value === "string" &&
+  (value.startsWith("data:") ||
+    value.startsWith("blob:") ||
+    value.startsWith("http://") ||
+    value.startsWith("https://"));
 
 const renderMergedAudioToWav = async (clips: Blob[]) => {
   const AudioContextCtor =
@@ -720,6 +761,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const [shadowAssessment, setShadowAssessment] = useState<AnalysisResult | null>(null);
   const [isSubmittingShadowScore, setIsSubmittingShadowScore] = useState(false);
   const [shadowScoreError, setShadowScoreError] = useState<string | null>(null);
+  const [isShadowFeedbackOpen, setIsShadowFeedbackOpen] = useState(false);
   const [practiceStatus, setPracticeStatus] = useState<"idle" | "countdown" | "active">("idle");
   const [countdownValue, setCountdownValue] = useState(3);
   const [practiceDraft, setPracticeDraft] = useState<SpeakingPracticeDraft | null>(null);
@@ -757,12 +799,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
   const pages = useMemo(() => {
     if (!document) return [];
-    const totalPages = Math.max(
-      document.pageObjectKeys?.length || 0,
-      document.pageCount || 0,
-      document.analysis.shadowPageTexts?.length || 0,
-      document.analysis.pages?.length || 0
-    );
+    const totalPages = Math.max(document.pageObjectKeys?.length || 0, document.pageCount || 0, 1);
     const shadowTexts = buildResolvedShadowTexts(document.analysis, totalPages);
     return buildStudentPracticePages(
       document.analysis.pages || [],
@@ -786,6 +823,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         null
     );
     setShadowScoreError(null);
+    setIsShadowFeedbackOpen(false);
     lastShadowAutoPlayKeyRef.current = null;
     lastSubmittedShadowSignatureRef.current = null;
     setPracticeStatus("idle");
@@ -864,11 +902,16 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       )
       .map((item) => ({
         pageIndex: item.pageIndex,
+        slot: normalizeStudentAudioSlot(item.slot),
         trackIndex: item.trackIndex,
         startSec: Math.max(0, item.startSec || 0),
         endSec: Math.max(Math.max(0, item.startSec || 0) + 0.15, item.endSec || 0),
       }))
-      .sort((left, right) => left.pageIndex - right.pageIndex);
+      .sort((left, right) => {
+        if (left.pageIndex !== right.pageIndex) return left.pageIndex - right.pageIndex;
+        const order = { single: 0, left: 1, right: 2 };
+        return order[left.slot] - order[right.slot];
+      });
   }, [document?.shadowAudio]);
 
   const resolvedTaskMode = forcedTaskMode || taskMode;
@@ -887,7 +930,20 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         ? []
         : shadowViews.flatMap((item, index) => {
             if (item.kind === "single") {
-              return [{ viewIndex: index, focus: 0 as const, pageIndex: item.pages[0] }];
+              const pageIndex = item.pages[0];
+              const pageText = getDisplayPageText(
+                document.analysis.title,
+                pageIndex,
+                shadowTexts[pageIndex] || ""
+              );
+              const { leftText, rightText } = splitDualPageText(pageText);
+              if (leftText && rightText) {
+                return [
+                  { viewIndex: index, focus: 0 as const, pageIndex },
+                  { viewIndex: index, focus: 1 as const, pageIndex },
+                ];
+              }
+              return [{ viewIndex: index, focus: 0 as const, pageIndex }];
             }
 
             const left = item.pages[0];
@@ -945,16 +1001,33 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const leftPageIndex =
     activeShadowView.kind === "spread" ? activeShadowView.pages[0] : activeShadowView.pages[0];
   const rightPageIndex = activeShadowView.kind === "spread" ? activeShadowView.pages[1] : null;
+  const singlePageText =
+    activeShadowView.kind === "single" && typeof activeShadowView.pages[0] === "number"
+      ? getDisplayPageText(
+          document?.analysis.title || "",
+          activeShadowView.pages[0],
+          shadowTexts[activeShadowView.pages[0]] || ""
+        )
+      : "";
+  const singlePageTextParts = splitDualPageText(singlePageText);
+  const isSingleDualTextView =
+    activeShadowView.kind === "single" &&
+    Boolean(singlePageTextParts.leftText.trim() && singlePageTextParts.rightText.trim());
   const leftText =
-    typeof leftPageIndex === "number"
+    isSingleDualTextView
+      ? singlePageTextParts.leftText
+      : typeof leftPageIndex === "number"
       ? getDisplayPageText(document?.analysis.title || "", leftPageIndex, shadowTexts[leftPageIndex] || "")
       : "";
   const rightText =
-    typeof rightPageIndex === "number"
+    isSingleDualTextView
+      ? singlePageTextParts.rightText
+      : typeof rightPageIndex === "number"
       ? getDisplayPageText(document?.analysis.title || "", rightPageIndex, shadowTexts[rightPageIndex] || "")
       : "";
   const leftDisplayText = activeShadowView.kind === "spread" && activeShadowView.pages[0] === null ? "" : leftText || "";
-  const rightDisplayText = activeShadowView.kind === "spread" && activeShadowView.pages[1] === null ? "" : rightText || "";
+  const rightDisplayText =
+    activeShadowView.kind === "spread" && activeShadowView.pages[1] === null ? "" : rightText || "";
   const hasLeftDisplayText = Boolean(leftDisplayText.trim());
   const hasRightDisplayText = Boolean(rightDisplayText.trim());
   const isDuplicatedSpreadText =
@@ -986,18 +1059,48 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         ? mergedSpreadPageIndex
         : spreadPageIndexes[Math.min(spreadFocus, spreadPageIndexes.length - 1)];
   const activeShadowText =
-    activeShadowView.kind === "spread"
+    isSingleDualTextView
+      ? spreadFocus === 0
+        ? leftText
+        : rightText
+      : activeShadowView.kind === "spread"
       ? shouldMergeSpreadTextBox
         ? mergedSpreadText
         : spreadFocus === 0
           ? leftText
           : rightText
       : leftText;
+  const activeShadowSlot: StoryflowPageAudioSegmentSlot =
+    isSingleDualTextView
+      ? spreadFocus === 0
+        ? "left"
+        : "right"
+      : "single";
+  const getSegmentsForShadowPage = (
+    targetPageIndex: number,
+    slot: StoryflowPageAudioSegmentSlot = "single"
+  ) => {
+    const normalizedSlot = normalizeStudentAudioSlot(slot);
+    const exactMatches = effectivePageSegments.filter(
+      (item) => item.pageIndex === targetPageIndex && item.slot === normalizedSlot
+    );
+    if (exactMatches.length) return exactMatches;
+    if (normalizedSlot !== "single") {
+      const fallbackSingleMatches = effectivePageSegments.filter(
+        (item) => item.pageIndex === targetPageIndex && item.slot === "single"
+      );
+      if (fallbackSingleMatches.length) return fallbackSingleMatches;
+    }
+    return effectivePageSegments.filter((item) => item.pageIndex === targetPageIndex);
+  };
   const buildShadowRecordingKey = (step: ShadowNavigationStep) =>
     `${assignmentId}:${step.viewIndex}:${step.focus}:${step.pageIndex}`;
   const shadowRecordableSteps = shadowNavigationSteps.filter((step) =>
     Boolean(
-      getDisplayPageText(document?.analysis.title || "", step.pageIndex, shadowTexts[step.pageIndex] || "").trim()
+      getShadowStepText(
+        getDisplayPageText(document?.analysis.title || "", step.pageIndex, shadowTexts[step.pageIndex] || ""),
+        step.focus
+      ).trim()
     )
   );
   const currentShadowRecordingKey = currentShadowStep
@@ -1009,17 +1112,42 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       ? safeShadowStepIndex < shadowNavigationSteps.length - 1
       : safeIndex < pages.length - 1;
   const pageImageUrl =
-    page && document ? resolvedUrls[document.pageObjectKeys?.[page.pageIndex] || ""] || "" : "";
+    page && document
+      ? (isDisplayUrl(document.images?.[page.pageIndex]) ? document.images?.[page.pageIndex] || "" : "") ||
+        resolvedUrls[document.pageObjectKeys?.[page.pageIndex] || ""]
+      : "";
   const speakingPromptText =
     page && hintStage >= 2
       ? page.visibleText
       : page && hintStage >= 1
-        ? buildClozePromptHint(
-            page.visibleText,
-            document?.analysis.keywords || [],
-            document?.analysis.fullText || "",
-            page.keyVocabulary
-          )
+        ? (() => {
+            if (page.clozeHint?.trim()) {
+              return page.clozeHint.trim();
+            }
+            const { leftText, rightText } = splitDualPageText(page.visibleText || "");
+            if (leftText && rightText) {
+              return joinDualPageText(
+                buildClozePromptHint(
+                  leftText,
+                  document?.analysis.keywords || [],
+                  document?.analysis.fullText || "",
+                  page.keyVocabulary
+                ),
+                buildClozePromptHint(
+                  rightText,
+                  document?.analysis.keywords || [],
+                  document?.analysis.fullText || "",
+                  page.keyVocabulary
+                )
+              );
+            }
+            return buildClozePromptHint(
+              page.visibleText,
+              document?.analysis.keywords || [],
+              document?.analysis.fullText || "",
+              page.keyVocabulary
+            );
+          })()
         : "";
   const activeTaskMeta = TASK_MODE_META.find((item) => item.key === resolvedTaskMode) || TASK_MODE_META[0];
   const storyKeywords = document?.analysis.keywords || [];
@@ -1029,9 +1157,10 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     .filter(Boolean)
     .join(" · ");
   const coverImageUrl =
+    (isDisplayUrl(document?.images?.[0]) ? document?.images?.[0] || "" : "") ||
     resolvedUrls[
       document?.pageObjectKeys?.[0] || document?.thumbnailObjectKey || ""
-    ] || "";
+    ];
   const assessmentCards = [
     {
       label: "影子跟读",
@@ -1059,13 +1188,13 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       :
     practicePage.sourcePageIndexes
       .flatMap((sourcePageIndex) =>
-        effectivePageSegments
-          .filter((item) => item.pageIndex === sourcePageIndex)
+        getSegmentsForShadowPage(sourcePageIndex)
           .map((segment) => {
             const url = resolvedUrls[document.shadowAudio?.tracks?.[segment.trackIndex]?.objectKey || ""] || "";
             if (!url) return null;
             return {
               pageIndex: sourcePageIndex,
+              slot: segment.slot,
               text: normalizeStoryText(document.analysis.shadowPageTexts?.[sourcePageIndex] || practicePage.visibleText),
               url,
               startSec: segment.startSec,
@@ -1076,19 +1205,15 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       );
   const currentShadowAudioUnits =
     typeof activeShadowPageIndex === "number" && document
-      ? effectivePageSegments
-          .filter((item) => item.pageIndex === activeShadowPageIndex)
+      ? getSegmentsForShadowPage(activeShadowPageIndex, activeShadowSlot)
           .map((segment) => {
             const url =
               resolvedUrls[document.shadowAudio?.tracks?.[segment.trackIndex]?.objectKey || ""] || "";
             if (!url) return null;
             return {
               pageIndex: activeShadowPageIndex,
-              text: getDisplayPageText(
-                document.analysis.title,
-                activeShadowPageIndex,
-                shadowTexts[activeShadowPageIndex] || ""
-              ),
+              slot: segment.slot,
+              text: activeShadowText,
               url,
               startSec: segment.startSec,
               endSec: segment.endSec,
@@ -1098,12 +1223,18 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       : [];
   const hasShadowAudio = currentShadowAudioUnits.length > 0;
   const leftHasPlayableAudio =
-    typeof leftPageIndex === "number"
-      ? effectivePageSegments.some((item) => item.pageIndex === leftPageIndex)
+    isSingleDualTextView
+      ? typeof activeShadowView.pages[0] === "number" &&
+        getSegmentsForShadowPage(activeShadowView.pages[0], "left").length > 0
+      : typeof leftPageIndex === "number"
+      ? getSegmentsForShadowPage(leftPageIndex).length > 0
       : false;
   const rightHasPlayableAudio =
-    typeof rightPageIndex === "number"
-      ? effectivePageSegments.some((item) => item.pageIndex === rightPageIndex)
+    isSingleDualTextView
+      ? typeof activeShadowView.pages[0] === "number" &&
+        getSegmentsForShadowPage(activeShadowView.pages[0], "right").length > 0
+      : typeof rightPageIndex === "number"
+      ? getSegmentsForShadowPage(rightPageIndex).length > 0
       : false;
   const recordedShadowCount = shadowRecordableSteps.filter((step) =>
     Boolean(recordedShadowClips[buildShadowRecordingKey(step)])
@@ -1130,11 +1261,73 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           )
           .join("|")}`
       : null;
+  const shadowSimpleComment = shadowAssessment?.simpleComment?.trim() || "";
+  const shadowFeedbackOverlay =
+    isShadowFeedbackOpen && shadowAssessment ? (
+      <div className="fixed inset-0 z-[120] bg-[rgba(0,0,0,0.3)] backdrop-blur-sm">
+        <div className="flex h-screen w-screen items-center justify-center px-4 py-4 md:px-6 md:py-6">
+          <div className="flex h-[92vh] w-[min(1440px,96vw)] flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-white shadow-[0_30px_90px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-500">
+                  Shadow Feedback
+                </p>
+                <h3 className="mt-2 text-[1.9rem] font-black text-slate-900">
+                  影子跟读点评
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsShadowFeedbackOpen(false)}
+                className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-200"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-6">
+              <div className="grid gap-3 sm:grid-cols-5">
+                {[
+                  ["流畅", shadowAssessment.fluency.score],
+                  ["发音", shadowAssessment.pronunciation.score],
+                  ["语调", shadowAssessment.intonation.score],
+                  ["词汇", shadowAssessment.vocabulary.score],
+                  ["表达", shadowAssessment.emotion.score],
+                ].map(([label, score]) => (
+                  <div
+                    key={`shadow_feedback_${String(label)}`}
+                    className="rounded-2xl bg-slate-50 px-3 py-4 text-center"
+                  >
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {label}
+                    </p>
+                    <p className="mt-1 text-3xl font-black text-slate-900">{score}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 rounded-[1.8rem] bg-gradient-to-br from-sky-50 to-white px-6 py-6 ring-1 ring-sky-100">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
+                  点评
+                </p>
+                <p className="mt-4 whitespace-pre-line text-lg leading-9 text-slate-800">
+                  {shadowAssessment.overallComment.trim() || shadowSimpleComment}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    ) : null;
   const showTeacherHints = hintStage >= 1;
   const showOriginalText = hintStage >= 2;
   const isPracticeActive = practiceStatus === "active";
   const isCountingDown = practiceStatus === "countdown";
   const displayPromptText = showOriginalText ? page?.visibleText || "" : speakingPromptText;
+  const displayPromptParts = splitDualPageText(displayPromptText);
+  const hasDualDisplayPrompt = Boolean(
+    displayPromptParts.leftText.trim() && displayPromptParts.rightText.trim()
+  );
   const latestPracticeRecord = latestPracticeId
     ? practiceRecords.find((item) => item.id === latestPracticeId) || null
     : practiceRecords[0] || null;
@@ -1341,10 +1534,13 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       audioDataUrl = await blobToDataUrl(mergedAudio);
       const referenceText = shadowRecordableSteps
         .map((step) =>
-          getDisplayPageText(
-            document.analysis.title,
-            step.pageIndex,
-            shadowTexts[step.pageIndex] || ""
+          getShadowStepText(
+            getDisplayPageText(
+              document.analysis.title,
+              step.pageIndex,
+              shadowTexts[step.pageIndex] || ""
+            ),
+            step.focus
           ).trim()
         )
         .filter(Boolean)
@@ -1901,11 +2097,32 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                             <p className="mb-2 text-sm font-semibold uppercase tracking-[0.22em] text-white/90 drop-shadow-[0_2px_6px_rgba(0,0,0,0.28)] md:text-base">
                               {speakingPromptTitle}
                             </p>
-                            <div className="rounded-[1.2rem] border border-white/10 bg-[rgba(0,0,0,0.42)] px-4 py-3 shadow-[0_12px_32px_rgba(15,23,42,0.26)] md:px-6 md:py-4">
-                              <p className="text-[1.47rem] font-semibold leading-[1.8] tracking-[0.01em] text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.38)] md:text-[1.875rem]">
-                                {displayPromptText || "暂无提示内容"}
-                              </p>
-                            </div>
+                            {hasDualDisplayPrompt ? (
+                              <div className="grid gap-3 text-left md:grid-cols-2">
+                                <div className="rounded-[1.2rem] border border-sky-200/30 bg-[rgba(0,0,0,0.42)] px-4 py-3 shadow-[0_12px_32px_rgba(15,23,42,0.26)] md:px-6 md:py-4">
+                                  <p className="text-sm font-semibold uppercase tracking-[0.18em] text-sky-100">
+                                    Left Page
+                                  </p>
+                                  <p className="mt-2 text-[1.32rem] font-semibold leading-[1.8] tracking-[0.01em] text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.38)] md:text-[1.6rem]">
+                                    {displayPromptParts.leftText}
+                                  </p>
+                                </div>
+                                <div className="rounded-[1.2rem] border border-violet-200/30 bg-[rgba(0,0,0,0.42)] px-4 py-3 shadow-[0_12px_32px_rgba(15,23,42,0.26)] md:px-6 md:py-4">
+                                  <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-100">
+                                    Right Page
+                                  </p>
+                                  <p className="mt-2 text-[1.32rem] font-semibold leading-[1.8] tracking-[0.01em] text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.38)] md:text-[1.6rem]">
+                                    {displayPromptParts.rightText}
+                                  </p>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="rounded-[1.2rem] border border-white/10 bg-[rgba(0,0,0,0.42)] px-4 py-3 shadow-[0_12px_32px_rgba(15,23,42,0.26)] md:px-6 md:py-4">
+                                <p className="text-[1.47rem] font-semibold leading-[1.8] tracking-[0.01em] text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.38)] md:text-[1.875rem]">
+                                  {displayPromptText || "暂无提示内容"}
+                                </p>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ) : null}
@@ -2153,15 +2370,17 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
   if (resolvedTaskMode === "shadow") {
     return (
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(186,230,253,0.85),_rgba(239,246,255,0.98)_45%,_white_100%)]">
-        <div className="mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-3 md:px-6">
-          <div className="overflow-hidden rounded-[1.9rem] bg-[radial-gradient(circle_at_top,_rgba(147,197,253,0.7),_rgba(224,242,254,0.9)_55%,_rgba(240,249,255,0.98)_100%)] shadow-[0_18px_60px_rgba(59,130,246,0.14)]">
-            <div className="relative flex h-[min(94vh,1040px)] min-h-[720px] flex-col">
-              <div className="absolute inset-0 opacity-60">
-                <div className="absolute -left-10 top-10 h-40 w-40 rounded-full bg-sky-200/40 blur-2xl" />
-                <div className="absolute right-10 top-20 h-56 w-56 rounded-full bg-indigo-200/35 blur-3xl" />
-                <div className="absolute left-1/2 top-1/2 h-64 w-64 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/35 blur-3xl" />
-              </div>
+      <>
+        {shadowFeedbackOverlay}
+        <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(186,230,253,0.85),_rgba(239,246,255,0.98)_45%,_white_100%)]">
+          <div className="mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-3 md:px-6">
+            <div className="overflow-hidden rounded-[1.9rem] bg-[radial-gradient(circle_at_top,_rgba(147,197,253,0.7),_rgba(224,242,254,0.9)_55%,_rgba(240,249,255,0.98)_100%)] shadow-[0_18px_60px_rgba(59,130,246,0.14)]">
+              <div className="relative flex h-[min(94vh,1040px)] min-h-[720px] flex-col">
+                <div className="absolute inset-0 opacity-60">
+                  <div className="absolute -left-10 top-10 h-40 w-40 rounded-full bg-sky-200/40 blur-2xl" />
+                  <div className="absolute right-10 top-20 h-56 w-56 rounded-full bg-indigo-200/35 blur-3xl" />
+                  <div className="absolute left-1/2 top-1/2 h-64 w-64 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/35 blur-3xl" />
+                </div>
 
               <div className="relative flex min-h-[340px] flex-1 items-start justify-center px-5 pb-10 pt-6 md:min-h-[420px] md:pb-12 md:pt-4">
                 <button
@@ -2252,7 +2471,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                   </button>
 
                   <div className="min-w-0">
-                    {activeShadowView.kind === "spread" ? (
+                    {activeShadowView.kind === "spread" || isSingleDualTextView ? (
                       <div className="grid gap-3 text-left sm:grid-cols-2">
                         {shouldMergeSpreadTextBox ? (
                           <div
@@ -2445,15 +2664,29 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                   </div>
 
                   <div className="flex items-end justify-end gap-3">
-                    {isSubmittingShadowScore ? (
-                      <div className="rounded-2xl bg-sky-500 px-3 py-2 text-center text-white shadow-md">
-                        <p className="text-sm font-semibold leading-none">评分中</p>
-                        <p className="mt-1 text-xs font-semibold">整段录音</p>
-                      </div>
-                    ) : overallShadowScore !== null ? (
-                      <div className="rounded-2xl bg-emerald-500 px-3 py-2 text-center text-white shadow-md">
-                        <p className="text-2xl font-semibold leading-none">{overallShadowScore}</p>
-                        <p className="mt-1 text-xs font-semibold">总评</p>
+                    {(shadowAssessment || isSubmittingShadowScore) ? (
+                      <div className="flex items-center justify-end gap-2">
+                        {isSubmittingShadowScore ? (
+                          <div className="rounded-2xl bg-sky-500 px-3 py-2 text-center text-white shadow-md">
+                            <p className="text-sm font-semibold leading-none">评分中</p>
+                            <p className="mt-1 text-xs font-semibold">整段录音</p>
+                          </div>
+                        ) : overallShadowScore !== null ? (
+                          <div className="rounded-2xl bg-emerald-500 px-3 py-2 text-center text-white shadow-md">
+                            <p className="text-2xl font-semibold leading-none">{overallShadowScore}</p>
+                            <p className="mt-1 text-xs font-semibold">总评</p>
+                          </div>
+                        ) : null}
+
+                        {shadowAssessment ? (
+                          <button
+                            type="button"
+                            onClick={() => setIsShadowFeedbackOpen(true)}
+                            className="rounded-2xl bg-white/90 px-4 py-2 text-sm font-semibold text-sky-700 shadow-md transition hover:bg-white"
+                          >
+                            点评
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
 
@@ -2486,43 +2719,12 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                     {shadowScoreError}
                   </div>
                 ) : null}
-
-                {shadowAssessment ? (
-                  <div className="mt-3 rounded-2xl border border-white/60 bg-white/70 px-4 py-4 shadow-sm backdrop-blur">
-                    <div className="grid gap-2 sm:grid-cols-5">
-                      {[
-                        ["流畅", shadowAssessment.fluency.score],
-                        ["发音", shadowAssessment.pronunciation.score],
-                        ["语调", shadowAssessment.intonation.score],
-                        ["词汇", shadowAssessment.vocabulary.score],
-                        ["表达", shadowAssessment.emotion.score],
-                      ].map(([label, score]) => (
-                        <div
-                          key={String(label)}
-                          className="rounded-xl bg-white px-3 py-2 text-center shadow-sm"
-                        >
-                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
-                            {label}
-                          </p>
-                          <p className="mt-1 text-xl font-semibold text-slate-800">{score}</p>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 rounded-xl bg-white/90 px-4 py-3 text-left shadow-sm">
-                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
-                        AI 点评
-                      </p>
-                      <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">
-                        {shadowAssessment.overallComment}
-                      </p>
-                    </div>
-                  </div>
-                ) : null}
+              </div>
               </div>
             </div>
           </div>
         </div>
-      </div>
+      </>
     );
   }
 

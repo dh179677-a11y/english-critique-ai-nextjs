@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { createSignedDownloadUrl } from "@/lib/cos";
 
 export const runtime = "nodejs";
 
@@ -18,7 +17,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       urls: Object.fromEntries(
-        objectKeys.map((objectKey) => [objectKey, createSignedDownloadUrl(objectKey)])
+        objectKeys.map((objectKey) => [
+          objectKey,
+          `/api/storyflow/file?key=${encodeURIComponent(objectKey)}`,
+        ])
       ),
     });
   } catch (error) {

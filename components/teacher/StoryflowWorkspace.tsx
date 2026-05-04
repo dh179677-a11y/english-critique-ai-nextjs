@@ -33,6 +33,7 @@ import {
   type StoryflowAudioTrack,
   type StoryflowCustomView,
   type StoryflowDocument,
+  type StoryflowPageAudioSegmentSlot,
   type StoryflowPerformanceConfig,
   type StoryflowPerformanceSectionConfig,
   type StoryflowPerformanceSectionKey,
@@ -45,12 +46,14 @@ import PerformanceTaskPreview, {
 
 const MAX_PREVIEW_PAGES = 6;
 const MAX_IMAGE_EDGE = 1200;
+const EMPTY_AUDIO_TRACKS: StoryflowAudioTrack[] = [];
 
 type TabKey = "mindmap" | "shadow" | "speaking" | "performance" | "feedback";
 type ShadowView =
   | { kind: "single"; pages: [number] }
   | { kind: "spread"; pages: [number | null, number | null] };
 type StoryflowAssessmentKey = "shadow" | "speaking" | "performance";
+type AudioSegmentSlot = StoryflowPageAudioSegmentSlot;
 type PdfJsModule = Awaited<typeof import("pdfjs-dist/legacy/build/pdf.mjs")>;
 type PdfJsDocumentInit = Parameters<PdfJsModule["getDocument"]>[0];
 
@@ -97,6 +100,7 @@ type StoryflowRematchDiagnostics = {
   }>;
   pages: Array<{
     pageIndex: number;
+    slot?: AudioSegmentSlot;
     pageText: string;
     matchedTrackIndex: number | null;
     matchedTrackFileName: string;
@@ -106,6 +110,39 @@ type StoryflowRematchDiagnostics = {
     matchedText: string;
     accepted?: boolean;
   }>;
+};
+
+type AudioSlotEntry = {
+  pageIndex: number;
+  slot: AudioSegmentSlot;
+  text: string;
+};
+
+const areStringArraysEqual = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const areDraftAudioMapsEqual = (
+  left: Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>,
+  right: Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>
+) => {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+
+  if (leftKeys.length !== rightKeys.length) return false;
+
+  return leftKeys.every((key) => {
+    const leftValue = left[Number(key)];
+    const rightValue = right[Number(key)];
+
+    if (!leftValue || !rightValue) return false;
+
+    return (
+      leftValue.trackIndex === rightValue.trackIndex &&
+      leftValue.startSec === rightValue.startSec &&
+      leftValue.endSec === rightValue.endSec &&
+      leftValue.hasSegment === rightValue.hasSegment
+    );
+  });
 };
 
 const STORYFLOW_ASSESSMENT_META: Record<
@@ -430,7 +467,8 @@ const getTextWeight = (text: string) => {
 const buildAudioMapping = (
   pageCount: number,
   shadowPageTexts: string[],
-  tracks: StoryflowAudioTrack[]
+  tracks: StoryflowAudioTrack[],
+  pairEditorModeByPage: Record<number, boolean> = {}
 ) => {
   if (!tracks.length || pageCount <= 0) {
     return {
@@ -441,14 +479,14 @@ const buildAudioMapping = (
 
   const pageSegments: Array<{
     pageIndex: number;
+    slot: AudioSegmentSlot;
     trackIndex: number;
     startSec: number;
     endSec: number;
   }> = [];
+  const slotEntries = buildAudioSlotEntries(pageCount, shadowPageTexts, pairEditorModeByPage);
   const pageIndexes = Array.from({ length: pageCount }, (_, idx) => idx);
-  const playablePageIndexes = pageIndexes.filter(
-    (pageIndex) => (shadowPageTexts[pageIndex] || "").trim().length > 0
-  );
+  const playableSlotEntries = slotEntries.filter((entry) => entry.text.length > 0);
 
   const parsePageIndexFromFileName = (fileName: string) =>
     parsePageIndexFromAudioName(fileName, pageCount);
@@ -460,13 +498,14 @@ const buildAudioMapping = (
 
   const pushWeightedSegments = (
     targetTrackIndex: number,
-    pages: number[],
+    entries: AudioSlotEntry[],
     totalDuration: number
   ) => {
-    if (!pages.length || totalDuration <= 0) {
-      pages.forEach((pageIndex) => {
+    if (!entries.length || totalDuration <= 0) {
+      entries.forEach((entry) => {
         pageSegments.push({
-          pageIndex,
+          pageIndex: entry.pageIndex,
+          slot: entry.slot,
           trackIndex: targetTrackIndex,
           startSec: 0,
           endSec: 0,
@@ -475,19 +514,19 @@ const buildAudioMapping = (
       return;
     }
 
-    const weights = pages.map((pageIndex) =>
-      getTextWeight(shadowPageTexts[pageIndex] || "")
-    );
-    const weightSum = weights.reduce((sum, value) => sum + value, 0) || pages.length;
+    const weights = entries.map((entry) => getTextWeight(entry.text));
+    const weightSum = weights.reduce((sum, value) => sum + value, 0) || entries.length;
     let cursor = 0;
 
-    pages.forEach((pageIndex, idx) => {
+    entries.forEach((entry, idx) => {
       const ratio = weights[idx] / weightSum;
-      const duration = idx === pages.length - 1 ? totalDuration - cursor : totalDuration * ratio;
+      const duration =
+        idx === entries.length - 1 ? totalDuration - cursor : totalDuration * ratio;
       const startSec = Math.max(0, cursor);
       const endSec = Math.max(startSec, Math.min(totalDuration, startSec + duration));
       pageSegments.push({
-        pageIndex,
+        pageIndex: entry.pageIndex,
+        slot: entry.slot,
         trackIndex: targetTrackIndex,
         startSec,
         endSec,
@@ -496,16 +535,17 @@ const buildAudioMapping = (
     });
   };
 
-  if (!playablePageIndexes.length) {
+  if (!playableSlotEntries.length) {
     return { tracks, pageSegments: [] };
   }
 
   if (tracks.length === 1) {
-    if (playablePageIndexes.length !== 1) {
+    if (playableSlotEntries.length !== 1) {
       return { tracks, pageSegments: [] };
     }
     pageSegments.push({
-      pageIndex: playablePageIndexes[0],
+      pageIndex: playableSlotEntries[0].pageIndex,
+      slot: playableSlotEntries[0].slot,
       trackIndex: 0,
       startSec: 0,
       endSec: tracks[0].durationSec,
@@ -536,6 +576,7 @@ const buildAudioMapping = (
     });
 
   const usedPages = new Set<number>();
+  const usedEntryKeys = new Set<string>();
   const unmatchedTracks: Array<{ track: StoryflowAudioTrack; trackIndex: number }> = [];
 
   orderedTrackMeta.forEach((meta) => {
@@ -543,12 +584,15 @@ const buildAudioMapping = (
       typeof meta.pageIndexHint === "number" &&
       meta.pageIndexHint >= 0 &&
       meta.pageIndexHint < pageCount &&
-      playablePageIndexes.includes(meta.pageIndexHint) &&
+      playableSlotEntries.some(
+        (entry) => entry.pageIndex === meta.pageIndexHint && entry.slot === "single"
+      ) &&
       !usedPages.has(meta.pageIndexHint)
     ) {
       usedPages.add(meta.pageIndexHint);
       pageSegments.push({
         pageIndex: meta.pageIndexHint,
+        slot: "single",
         trackIndex: meta.trackIndex,
         startSec: 0,
         endSec: meta.track.durationSec,
@@ -557,18 +601,20 @@ const buildAudioMapping = (
     }
     if (meta.pageRangeHint) {
       const pageRangeHint = meta.pageRangeHint;
-      const rangedPages = pageIndexes.filter(
-        (pageIndex) =>
-          pageIndex >= pageRangeHint.startPageIndex &&
-          pageIndex <= pageRangeHint.endPageIndex &&
-          playablePageIndexes.includes(pageIndex) &&
-          !usedPages.has(pageIndex)
-      );
-      if (rangedPages.length) {
-        rangedPages.forEach((pageIndex) => {
-          usedPages.add(pageIndex);
+      const rangedEntries = playableSlotEntries.filter((entry) => {
+        const entryKey = getAudioSlotKey(entry.pageIndex, entry.slot);
+        return (
+          entry.pageIndex >= pageRangeHint.startPageIndex &&
+          entry.pageIndex <= pageRangeHint.endPageIndex &&
+          !usedEntryKeys.has(entryKey)
+        );
+      });
+      if (rangedEntries.length) {
+        rangedEntries.forEach((entry) => {
+          usedPages.add(entry.pageIndex);
+          usedEntryKeys.add(getAudioSlotKey(entry.pageIndex, entry.slot));
         });
-        pushWeightedSegments(meta.trackIndex, rangedPages, meta.track.durationSec);
+        pushWeightedSegments(meta.trackIndex, rangedEntries, meta.track.durationSec);
         return;
       }
     }
@@ -578,13 +624,17 @@ const buildAudioMapping = (
     });
   });
 
-  const unmatchedPages = playablePageIndexes.filter((pageIndex) => !usedPages.has(pageIndex));
+  const unmatchedEntries = playableSlotEntries.filter(
+    (entry) => !usedEntryKeys.has(getAudioSlotKey(entry.pageIndex, entry.slot))
+  );
 
-  if (unmatchedTracks.length && unmatchedPages.length) {
-    const pairCount = Math.min(unmatchedTracks.length, unmatchedPages.length);
+  if (unmatchedTracks.length && unmatchedEntries.length) {
+    const pairCount = Math.min(unmatchedTracks.length, unmatchedEntries.length);
     for (let index = 0; index < pairCount; index += 1) {
+      const entry = unmatchedEntries[index];
       pageSegments.push({
-        pageIndex: unmatchedPages[index],
+        pageIndex: entry.pageIndex,
+        slot: entry.slot,
         trackIndex: unmatchedTracks[index].trackIndex,
         startSec: 0,
         endSec: unmatchedTracks[index].track.durationSec,
@@ -593,20 +643,26 @@ const buildAudioMapping = (
   }
 
   if (pageSegments.length) {
-    const dedup = new Map<number, (typeof pageSegments)[number]>();
+    const dedup = new Map<string, (typeof pageSegments)[number]>();
     pageSegments.forEach((segment) => {
-      if (!dedup.has(segment.pageIndex)) {
-        dedup.set(segment.pageIndex, segment);
+      const segmentKey = getAudioSlotKey(segment.pageIndex, segment.slot);
+      if (!dedup.has(segmentKey)) {
+        dedup.set(segmentKey, segment);
       }
     });
-    const ordered = [...dedup.values()].sort((a, b) => a.pageIndex - b.pageIndex);
+    const ordered = [...dedup.values()].sort((a, b) =>
+      a.pageIndex !== b.pageIndex
+        ? a.pageIndex - b.pageIndex
+        : AUDIO_SLOT_ORDER[a.slot] - AUDIO_SLOT_ORDER[b.slot]
+    );
     return { tracks, pageSegments: ordered };
   }
 
-  if (tracks.length === playablePageIndexes.length) {
-    playablePageIndexes.forEach((pageIndex, trackIndex) => {
+  if (tracks.length === playableSlotEntries.length) {
+    playableSlotEntries.forEach((entry, trackIndex) => {
       pageSegments.push({
-        pageIndex,
+        pageIndex: entry.pageIndex,
+        slot: entry.slot,
         trackIndex,
         startSec: 0,
         endSec: tracks[trackIndex].durationSec,
@@ -657,9 +713,14 @@ const buildResolvedShadowTexts = (
 const preserveExistingAudioMapping = (
   shadowAudio: StoryflowDocument["shadowAudio"],
   pageCount: number,
-  shadowPageTexts: string[] = []
+  shadowPageTexts: string[] = [],
+  pairEditorModeByPage: Record<number, boolean> = {}
 ) => {
   if (!shadowAudio?.tracks?.length) return shadowAudio;
+  const playableEntries = buildAudioSlotEntries(pageCount, shadowPageTexts, pairEditorModeByPage);
+  const playableEntryKeys = new Set(
+    playableEntries.map((entry) => getAudioSlotKey(entry.pageIndex, entry.slot))
+  );
 
   const nextSegments = (shadowAudio.pageSegments || [])
     .filter(
@@ -667,12 +728,23 @@ const preserveExistingAudioMapping = (
         Number.isFinite(segment.pageIndex) &&
         segment.pageIndex >= 0 &&
         segment.pageIndex < pageCount &&
-        (shadowPageTexts[segment.pageIndex] || "").trim().length > 0 &&
+        playableEntryKeys.has(
+          getAudioSlotKey(segment.pageIndex, normalizeAudioSegmentSlot(segment.slot))
+        ) &&
         Number.isFinite(segment.trackIndex) &&
         segment.trackIndex >= 0 &&
         segment.trackIndex < shadowAudio.tracks.length
     )
-    .sort((left, right) => left.pageIndex - right.pageIndex);
+    .map((segment) => ({
+      ...segment,
+      slot: normalizeAudioSegmentSlot(segment.slot),
+    }))
+    .sort((left, right) =>
+      left.pageIndex !== right.pageIndex
+        ? left.pageIndex - right.pageIndex
+        : AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(left.slot)] -
+          AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(right.slot)]
+    );
 
   return {
     tracks: shadowAudio.tracks,
@@ -1089,6 +1161,22 @@ const buildClozePromptHint = (
   });
 };
 
+const buildStoredClozeHint = (
+  visibleText: string,
+  storyKeywords: string[],
+  fullText: string,
+  pageKeywords: string[]
+) => {
+  const { leftText, rightText } = splitDualPageText(visibleText);
+  if (leftText && rightText) {
+    return joinDualPageText(
+      buildClozePromptHint(leftText, storyKeywords, fullText, pageKeywords),
+      buildClozePromptHint(rightText, storyKeywords, fullText, pageKeywords)
+    );
+  }
+  return buildClozePromptHint(visibleText, storyKeywords, fullText, pageKeywords);
+};
+
 const buildPreviewPagesFromShadowTexts = (
   previousPages: StoryflowAnalysis["pages"],
   shadowTexts: string[]
@@ -1122,6 +1210,10 @@ const buildPreviewPagesFromShadowTexts = (
       pageTitle: previous?.pageTitle || `Page ${index + 1}`,
       storyBeat: visibleText,
       visibleText,
+      clozeHint:
+        previous?.clozeHint && previous.clozeHint.trim()
+          ? previous.clozeHint.trim()
+          : "",
       bilingualHint:
         previous?.bilingualHint && previous.bilingualHint !== "请先观察图片，再根据原文复述。"
           ? previous.bilingualHint
@@ -1133,6 +1225,180 @@ const buildPreviewPagesFromShadowTexts = (
       keyVocabulary,
     };
   });
+};
+
+const createManualStoryflowAnalysis = (
+  sourceName: string,
+  pageCount: number
+): StoryflowAnalysis => {
+  const normalizedTitle = sourceName.trim() || "未命名绘本";
+  const blankTexts = Array.from({ length: Math.max(1, pageCount) }, () => "");
+
+  return {
+    title: normalizedTitle,
+    summary: "老师手动创建的任务，可继续逐页上传图片并补充文本内容。",
+    fullText: "",
+    characters: [],
+    setting: {
+      time: "",
+      place: "",
+    },
+    mindMap: {
+      beginning: [],
+      middle: [],
+      end: [],
+    },
+    pages: buildPreviewPagesFromShadowTexts([], blankTexts),
+    shadowPageTexts: blankTexts,
+    keywords: [],
+    teacherGuide: [],
+  };
+};
+
+const parseMetadataLineList = (value: string) =>
+  value
+    .split(/\n|,|\/|、/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const scoreDecodedText = (value: string) => {
+  const replacementCount = (value.match(/�/g) || []).length;
+  const mojibakeCount = (value.match(/[�ÃÐÒÑÊÕÞ]/g) || []).length;
+  const cjkCount = (value.match(/[\u4e00-\u9fff]/g) || []).length;
+  const headingCount = (
+    value.match(/(?:标题|摘要|角色|时间|地点|关键词|开头|中间|结尾|原文|Title|Summary|Beginning|Middle|End|Original Text)/gi) || []
+  ).length;
+  return cjkCount * 2 + headingCount * 6 - replacementCount * 10 - mojibakeCount * 4;
+};
+
+const decodeImportedTextCandidates = async (file: File) => {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const candidates = new Map<string, number>();
+  const encodings = ["utf-8", "gb18030", "gbk", "utf-16le"];
+
+  encodings.forEach((encoding) => {
+    try {
+      const decoded = new TextDecoder(encoding).decode(bytes);
+      candidates.set(decoded, scoreDecodedText(decoded));
+    } catch {
+      // ignore unsupported encodings
+    }
+  });
+
+  if (!candidates.size) {
+    const fallback = await file.text();
+    return [fallback];
+  }
+
+  return [...candidates.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([decoded]) => decoded);
+};
+
+const decodeImportedTextFile = async (file: File) => {
+  const candidates = await decodeImportedTextCandidates(file);
+  return candidates[0] || "";
+};
+
+const parseStructuredMetadataImport = (rawText: string) => {
+  const normalized = rawText.replace(/\r\n?/g, "\n").trim();
+  const result = {
+    title: "",
+    summary: "",
+    characters: "",
+    time: "",
+    place: "",
+    keywords: "",
+    mindMapBeginning: "",
+    mindMapMiddle: "",
+    mindMapEnd: "",
+    originalText: "",
+  };
+  if (!normalized) return result;
+
+  const headingMap: Array<{
+    names: string[];
+    target: keyof typeof result;
+  }> = [
+    { names: ["标题", "书名", "绘本标题", "title"], target: "title" },
+    { names: ["摘要", "简介", "内容简介", "summary"], target: "summary" },
+    { names: ["角色", "人物", "character", "characters"], target: "characters" },
+    { names: ["时间", "时间地点", "time"], target: "time" },
+    { names: ["地点", "场景", "place", "setting"], target: "place" },
+    { names: ["关键词", "关键字", "核心词", "keyword", "keywords"], target: "keywords" },
+    { names: ["思维导图开头", "思维导图-开头", "开头", "开始", "起因", "beginning"], target: "mindMapBeginning" },
+    { names: ["思维导图中间", "思维导图-中间", "中间", "发展", "经过", "过程", "middle"], target: "mindMapMiddle" },
+    { names: ["思维导图结尾", "思维导图-结尾", "结尾", "结果", "最后", "end", "ending"], target: "mindMapEnd" },
+    { names: ["原文", "正文", "original text"], target: "originalText" },
+  ];
+
+  const lines = normalized.split("\n");
+  let activeTarget: keyof typeof result | null = null;
+  const normalizeHeadingToken = (value: string) =>
+    value
+      .replace(/^[#*\-\s]+/, "")
+      .replace(/[*#\s]+$/g, "")
+      .replace(/[：:]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  const bucket: Record<keyof typeof result, string[]> = {
+    title: [],
+    summary: [],
+    characters: [],
+    time: [],
+    place: [],
+    keywords: [],
+    mindMapBeginning: [],
+    mindMapMiddle: [],
+    mindMapEnd: [],
+    originalText: [],
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (activeTarget) bucket[activeTarget].push("");
+      continue;
+    }
+
+    let matchedTarget: keyof typeof result | null = null;
+    let inlineValue = "";
+    for (const item of headingMap) {
+      const colonMatch = trimmed.match(/^(.+?)[：:]\s*(.*)$/);
+      const labelPart = colonMatch ? colonMatch[1] : trimmed;
+      const candidateTokens = labelPart
+        .split(/[\/|｜]/)
+        .map((token) => normalizeHeadingToken(token))
+        .filter(Boolean);
+      const normalizedNames = item.names.map((name) => normalizeHeadingToken(name));
+      const tokenMatched = candidateTokens.some((token) => normalizedNames.includes(token));
+
+      if (tokenMatched) {
+        matchedTarget = item.target;
+        inlineValue = colonMatch?.[2]?.trim() || "";
+        break;
+      }
+      if (matchedTarget) break;
+    }
+
+    if (matchedTarget) {
+      activeTarget = matchedTarget;
+      if (inlineValue) bucket[matchedTarget].push(inlineValue);
+      continue;
+    }
+
+    if (activeTarget) {
+      bucket[activeTarget].push(trimmed);
+    }
+  }
+
+  (Object.keys(bucket) as Array<keyof typeof result>).forEach((key) => {
+    result[key] = bucket[key].join("\n").trim();
+  });
+
+  return result;
 };
 
 type SpeakingPracticePage = StoryflowAnalysis["pages"][number] & {
@@ -1244,43 +1510,222 @@ const buildSpeakingPracticePages = (
   pageObjectKeys: string[]
 ): SpeakingPracticePage[] => {
   const previewPages = buildPreviewPagesFromShadowTexts(previousPages, shadowTexts);
-  const mergedPages: SpeakingPracticePage[] = [];
+  const pageByIndex = new Map(previewPages.map((page) => [page.pageIndex, page] as const));
+  const targetCount = Math.max(previewPages.length, pageObjectKeys.length, 1);
+  const fullTextSource = shadowTexts.filter(Boolean).join(" ");
+  const documentKeywords = Array.from(
+    new Set(
+      previewPages.flatMap((page) =>
+        (page.visibleText || "")
+          .split(/[^A-Za-z']+/)
+          .map((item) => item.trim().toLowerCase())
+          .filter((item) => item.length > 1)
+      )
+    )
+  );
 
-  previewPages.forEach((page) => {
-    const visibleText = normalizeStoryText(page.visibleText || "");
-    if (!visibleText) return;
+  return Array.from({ length: targetCount }, (_, index) => {
+    const page = pageByIndex.get(index);
+    const visibleText = normalizeStoryText(page?.visibleText || "");
+    const baseText = visibleText || normalizeStoryText(page?.storyBeat || "");
+    const words = baseText
+      .split(/[^A-Za-z']+/)
+      .map((item) => item.trim().toLowerCase())
+      .filter((item) => item.length > 1);
 
-    const pageObjectKey = pageObjectKeys[page.pageIndex] || "";
-    const lastPage = mergedPages[mergedPages.length - 1];
-    const lastPageObjectKey = lastPage ? pageObjectKeys[lastPage.pageIndex] || "" : "";
+    return {
+      pageIndex: index,
+      pageTitle: page?.pageTitle || `Page ${index + 1}`,
+      storyBeat: baseText,
+      visibleText: baseText,
+      clozeHint:
+        page?.clozeHint?.trim() ||
+        buildStoredClozeHint(
+          baseText,
+          documentKeywords,
+          fullTextSource,
+          Array.from(new Set(words)).slice(0, 6)
+        ),
+      bilingualHint:
+        page?.bilingualHint && page.bilingualHint !== "请先观察图片，再根据原文复述。"
+          ? page.bilingualHint
+          : buildContentTeacherHint(baseText),
+      speakingPrompt:
+        page?.speakingPrompt?.length && !isGenericSpeakingPrompt(page.speakingPrompt)
+          ? page.speakingPrompt
+          : buildContentSpeakingPrompts(baseText),
+      keyVocabulary: Array.from(new Set(words)).slice(0, 6),
+      sourcePageIndexes: [index],
+    };
+  });
+};
 
-    if (lastPage && pageObjectKey && lastPageObjectKey && pageObjectKey === lastPageObjectKey) {
-      const mergedText = mergeStoryTextSegments([lastPage.visibleText, visibleText]);
-      const words = mergedText
-        .split(/[^A-Za-z']+/)
-        .map((item) => item.trim().toLowerCase())
-        .filter((item) => item.length > 1);
+const parseImportedPageTexts = (rawText: string): string[] => {
+  const normalized = rawText.replace(/\r\n?/g, "\n").trim();
+  if (!normalized) return [];
 
-      lastPage.sourcePageIndexes.push(page.pageIndex);
-      lastPage.visibleText = mergedText;
-      lastPage.storyBeat = mergedText;
-      lastPage.bilingualHint = buildContentTeacherHint(mergedText);
-      lastPage.speakingPrompt = buildContentSpeakingPrompts(mergedText);
-      lastPage.keyVocabulary = Array.from(new Set(words)).slice(0, 6);
-      return;
+  const stripPageLabel = (value: string) =>
+    value
+      .replace(/^(?:page|p)\s*\d+\s*[:：.\-]?\s*/i, "")
+      .replace(/^第\s*\d+\s*页\s*[:：.\-]?\s*/i, "")
+      .trim();
+
+  const pageMarkerMatches = normalized.match(/^(?:page|p)\s*\d+\s*[:：.\-]?|^第\s*\d+\s*页\s*[:：.\-]?/gim);
+  if (pageMarkerMatches && pageMarkerMatches.length > 1) {
+    const chunks = normalized
+      .split(/(?=^(?:page|p)\s*\d+\s*[:：.\-]?|^第\s*\d+\s*页\s*[:：.\-]?)/gim)
+      .map((item) => stripPageLabel(item))
+      .filter(Boolean);
+    if (chunks.length) return chunks;
+  }
+
+  if (normalized.includes("\f")) {
+    const chunks = normalized
+      .split("\f")
+      .map((item) => stripPageLabel(item))
+      .filter(Boolean);
+    if (chunks.length) return chunks;
+  }
+
+  const paragraphChunks = normalized
+    .split(/\n\s*\n+/)
+    .map((item) => stripPageLabel(item))
+    .filter(Boolean);
+  if (paragraphChunks.length > 1) return paragraphChunks;
+
+  return normalized
+    .split("\n")
+    .map((item) => stripPageLabel(item))
+    .filter(Boolean);
+};
+
+const splitDualPageText = (value: string) => {
+  const normalized = value.replace(/\r\n?/g, "\n");
+  const markerMatch = normalized.match(/\[RIGHT_PAGE\]/i);
+  if (markerMatch && typeof markerMatch.index === "number") {
+    return {
+      leftText: normalized.slice(0, markerMatch.index).trim(),
+      rightText: normalized
+        .slice(markerMatch.index + markerMatch[0].length)
+        .trim(),
+    };
+  }
+
+  const blankLineDivider = normalized.split(/\n\s*\n/);
+  if (blankLineDivider.length >= 2) {
+    return {
+      leftText: blankLineDivider[0].trim(),
+      rightText: blankLineDivider.slice(1).join("\n\n").trim(),
+    };
+  }
+
+  return {
+    leftText: normalized.trim(),
+    rightText: "",
+  };
+};
+
+const joinDualPageText = (leftText: string, rightText: string) => {
+  const safeLeft = leftText.trim();
+  const safeRight = rightText.trim();
+  if (safeLeft && safeRight) {
+    return `${safeLeft}\n\n[RIGHT_PAGE]\n${safeRight}`;
+  }
+  return safeLeft || safeRight;
+};
+
+const mergeDualPageTextToSingle = (leftText: string, rightText: string) =>
+  [leftText.trim(), rightText.trim()].filter(Boolean).join("\n");
+
+const AUDIO_SLOT_ORDER: Record<AudioSegmentSlot, number> = {
+  single: 0,
+  left: 1,
+  right: 2,
+};
+
+const normalizeAudioSegmentSlot = (value: unknown): AudioSegmentSlot =>
+  value === "left" || value === "right" || value === "single" ? value : "single";
+
+const getAudioSlotKey = (pageIndex: number, slot: AudioSegmentSlot) => `${pageIndex}:${slot}`;
+
+const getTextForAudioSlot = (rawText: string, slot: AudioSegmentSlot) => {
+  if (slot === "single") return rawText.trim();
+  const { leftText, rightText } = splitDualPageText(rawText);
+  return (slot === "left" ? leftText : rightText).trim();
+};
+
+const buildAudioSlotEntries = (
+  pageCount: number,
+  shadowPageTexts: string[],
+  pairEditorModeByPage: Record<number, boolean>
+) =>
+  Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).flatMap<AudioSlotEntry>((pageIndex) => {
+    const rawText = shadowPageTexts[pageIndex] || "";
+    if (pairEditorModeByPage[pageIndex]) {
+      const { leftText, rightText } = splitDualPageText(rawText);
+      return [
+        { pageIndex, slot: "left" as const, text: leftText.trim() },
+        { pageIndex, slot: "right" as const, text: rightText.trim() },
+      ].filter((entry) => entry.text.length > 0);
     }
-
-    mergedPages.push({
-      ...page,
-      visibleText,
-      storyBeat: visibleText,
-      bilingualHint: buildContentTeacherHint(visibleText),
-      speakingPrompt: buildContentSpeakingPrompts(visibleText),
-      sourcePageIndexes: [page.pageIndex],
-    });
+    const singleText = rawText.trim();
+    return singleText ? [{ pageIndex, slot: "single" as const, text: singleText }] : [];
   });
 
-  return mergedPages;
+const getShadowStepText = (rawText: string, focus: 0 | 1) => {
+  const { leftText, rightText } = splitDualPageText(rawText);
+  if (rightText) {
+    return (focus === 0 ? leftText : rightText).trim();
+  }
+  return leftText.trim();
+};
+
+const buildPairEditorModeByPage = (
+  document: StoryflowDocument,
+  pageCount: number,
+  _shadowTextsOverride?: string[]
+) => {
+  const persisted = new Set(document.pairEditorModePages || []);
+  const result: Record<number, boolean> = {};
+
+  Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).forEach((pageIndex) => {
+    if (persisted.has(pageIndex)) {
+      result[pageIndex] = true;
+    }
+  });
+
+  return result;
+};
+
+const buildPairEditorModeByFlags = (pageFlags: Array<boolean | undefined>, pageCount: number) =>
+  Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).reduce<Record<number, boolean>>(
+    (result, pageIndex) => {
+      if (pageFlags[pageIndex]) result[pageIndex] = true;
+      return result;
+    },
+    {}
+  );
+
+const serializePairEditorModePages = (
+  pairEditorModeByPage: Record<number, boolean>,
+  pageCount: number
+) =>
+  Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).filter(
+    (pageIndex) => Boolean(pairEditorModeByPage[pageIndex])
+  );
+
+const remapPairEditorModePages = (
+  pairEditorModePages: number[] | undefined,
+  pageCount: number,
+  transform: (enabled: boolean[], pageCount: number) => boolean[]
+) => {
+  const source = Array.from({ length: pageCount }, (_, pageIndex) =>
+    Boolean(pairEditorModePages?.includes(pageIndex))
+  );
+  const next = transform(source, pageCount);
+  return next
+    .map((enabled, pageIndex) => (enabled ? pageIndex : -1))
+    .filter((pageIndex) => pageIndex >= 0);
 };
 
 const resizeImageFile = (file: File): Promise<string> =>
@@ -1482,6 +1927,7 @@ const uploadPdfAllPagesToCos = async (
   const totalPages = pdf.numPages;
   const objectKeys: string[] = [];
   const pageTexts: string[] = [];
+  const previewImages: string[] = [];
 
   for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
     onProgress?.(pageNumber, totalPages);
@@ -1515,6 +1961,7 @@ const uploadPdfAllPagesToCos = async (
     }).promise;
 
     const dataUrl = canvas.toDataURL("image/jpeg", 0.64);
+    previewImages.push(dataUrl);
     // eslint-disable-next-line no-await-in-loop
     const blob = await dataUrlToBlob(dataUrl);
     // eslint-disable-next-line no-await-in-loop
@@ -1530,6 +1977,7 @@ const uploadPdfAllPagesToCos = async (
   return {
     objectKeys,
     pageTexts,
+    previewImages,
   };
 };
 
@@ -1621,7 +2069,11 @@ const resolveNeededObjectKeys = (documents: StoryflowDocument[], activeId: strin
       keys.add(item.thumbnailObjectKey);
     }
     if (item.id === activeId) {
-      item.pageObjectKeys?.forEach((key) => keys.add(key));
+      item.pageObjectKeys?.forEach((key) => {
+        if (key) {
+          keys.add(key);
+        }
+      });
       item.shadowAudio?.tracks.forEach((track) => keys.add(track.objectKey));
       item.sourceAssets?.forEach((asset) => keys.add(asset.objectKey));
     }
@@ -1638,12 +2090,16 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const replaceImageInputRef = useRef<HTMLInputElement | null>(null);
   const insertImageInputRef = useRef<HTMLInputElement | null>(null);
+  const batchImageInputRef = useRef<HTMLInputElement | null>(null);
+  const pairEditorModeByPageRef = useRef<Record<number, boolean>>({});
   const shadowReaderRef = useRef<ShadowReaderHandle | null>(null);
   const [documents, setDocuments] = useState<StoryflowDocument[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("mindmap");
   const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [isBatchTextPasteOpen, setIsBatchTextPasteOpen] = useState(false);
+  const [isMetaEditorOpen, setIsMetaEditorOpen] = useState(false);
   const [isPublishOpen, setIsPublishOpen] = useState(false);
   const [selectedPublishStudentIds, setSelectedPublishStudentIds] = useState<string[]>([]);
   const [replacingPageIndex, setReplacingPageIndex] = useState<number | null>(null);
@@ -1651,11 +2107,13 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   const [speakingPageIndex, setSpeakingPageIndex] = useState(0);
   const [shadowViewIndex, setShadowViewIndex] = useState(0);
   const [sourceName, setSourceName] = useState("");
+  const [manualPageCount, setManualPageCount] = useState(6);
   const [pendingAssets, setPendingAssets] = useState<PendingAsset[]>([]);
   const [pendingAudioAssets, setPendingAudioAssets] = useState<PendingAudioAsset[]>([]);
   const [resolvedUrls, setResolvedUrls] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [batchTextPasteValue, setBatchTextPasteValue] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const refreshDocuments = () => {
@@ -1698,6 +2156,19 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     setSpeakingPageIndex(0);
     setShadowViewIndex(0);
   }, [activeId]);
+
+  useEffect(() => {
+    if (!activeDocument) {
+      pairEditorModeByPageRef.current = {};
+      return;
+    }
+    const pageCount = Math.max(
+      activeDocument.pageObjectKeys?.length || 0,
+      activeDocument.pageCount || 0,
+      activeDocument.analysis.shadowPageTexts?.length || 0
+    );
+    pairEditorModeByPageRef.current = buildPairEditorModeByPage(activeDocument, pageCount);
+  }, [activeDocument]);
 
   useEffect(() => {
     setSelectedPublishStudentIds([]);
@@ -1756,23 +2227,33 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   }, [activeId, documents, resolvedUrls]);
 
   const getDocumentThumbnailUrl = (document: StoryflowDocument) => {
+    const localPreview = document.images?.[0];
+    if (isDisplayUrl(localPreview)) {
+      return localPreview!;
+    }
     if (isDisplayUrl(document.thumbnail)) {
       return document.thumbnail!;
     }
     if (document.thumbnailObjectKey) {
-      return resolvedUrls[document.thumbnailObjectKey] || "";
+      const resolved = resolvedUrls[document.thumbnailObjectKey];
+      if (resolved) return resolved;
+    }
+    if (document.pageObjectKeys?.[0]) {
+      const resolved = resolvedUrls[document.pageObjectKeys[0]];
+      if (resolved) return resolved;
     }
     return "";
   };
 
   const getDocumentPageUrl = (document: StoryflowDocument, pageIndex: number) => {
-    const pageObjectKey = document.pageObjectKeys?.[pageIndex];
-    if (pageObjectKey) {
-      return resolvedUrls[pageObjectKey] || getDocumentThumbnailUrl(document);
-    }
     const legacyImage = document.images?.[pageIndex];
     if (isDisplayUrl(legacyImage)) {
       return legacyImage!;
+    }
+    const pageObjectKey = document.pageObjectKeys?.[pageIndex];
+    if (pageObjectKey) {
+      const resolved = resolvedUrls[pageObjectKey];
+      if (resolved) return resolved;
     }
     return getDocumentThumbnailUrl(document);
   };
@@ -1817,11 +2298,27 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       const nextPageKeys = moveArrayItem(oldPageKeys, fromIndex, toIndex);
       const nextImages = oldImages.length ? moveArrayItem(oldImages, fromIndex, toIndex) : oldImages;
       const nextTexts = moveArrayItem(oldTexts, fromIndex, toIndex);
+      const nextPairEditorModePages = remapPairEditorModePages(
+        document.pairEditorModePages,
+        Math.max(oldPageKeys.length, oldTexts.length),
+        (enabled) => moveArrayItem(enabled, fromIndex, toIndex)
+      );
+      const nextPairEditorModeByPage = buildPairEditorModeByFlags(
+        Array.from({ length: nextPageKeys.length }, (_, pageIndex) =>
+          nextPairEditorModePages.includes(pageIndex)
+        ),
+        nextPageKeys.length
+      );
 
       const nextPages = buildPreviewPagesFromShadowTexts(document.analysis.pages || [], nextTexts);
       const nextShadowAudio =
         document.shadowAudio?.tracks?.length
-          ? buildAudioMapping(nextPageKeys.length, nextTexts, document.shadowAudio.tracks)
+          ? buildAudioMapping(
+              nextPageKeys.length,
+              nextTexts,
+              document.shadowAudio.tracks,
+              nextPairEditorModeByPage
+            )
           : document.shadowAudio;
 
       return {
@@ -1829,6 +2326,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         pageObjectKeys: nextPageKeys,
         images: nextImages,
         pageCount: nextPageKeys.length || nextImages.length || document.pageCount,
+        pairEditorModePages: nextPairEditorModePages,
         thumbnailObjectKey: nextPageKeys[0] || document.thumbnailObjectKey,
         analysis: {
           ...document.analysis,
@@ -1862,10 +2360,49 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           pages: nextPages,
           shadowPageTexts: nextTexts,
         },
-        shadowAudio: preserveExistingAudioMapping(document.shadowAudio, size, nextTexts),
+        shadowAudio: preserveExistingAudioMapping(
+          document.shadowAudio,
+          size,
+          nextTexts,
+          buildPairEditorModeByPage(document, size, nextTexts)
+        ),
       };
     });
     setNotice(`第 ${pageIndex + 1} 页文字已保存。`);
+  };
+
+  const handleGenerateSpeakingHints = (texts: string[]) => {
+    if (!activeDocument) return;
+    applyDocumentUpdate(activeDocument.id, (document) => {
+      const size = Math.max(
+        document.pageObjectKeys?.length || 0,
+        document.analysis.shadowPageTexts?.length || 0,
+        texts.length
+      );
+      const nextTexts = Array.from({ length: size }, (_, idx) => (texts[idx] || "").trim());
+      const previewPages = buildPreviewPagesFromShadowTexts(document.analysis.pages || [], nextTexts);
+      const nextFullText = nextTexts.filter(Boolean).join("\n");
+      const nextPages = previewPages.map((page) => ({
+        ...page,
+        clozeHint: buildStoredClozeHint(
+          page.visibleText,
+          document.analysis.keywords || [],
+          nextFullText,
+          page.keyVocabulary || []
+        ),
+      }));
+
+      return {
+        ...document,
+        analysis: {
+          ...document.analysis,
+          pages: nextPages,
+          shadowPageTexts: nextTexts,
+          fullText: nextFullText,
+        },
+      };
+    });
+    setNotice("已根据当前课文生成“给个提示”内容。");
   };
 
   const handleSaveAllPageTexts = (texts: string[]) => {
@@ -1887,7 +2424,12 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           shadowPageTexts: nextTexts,
           fullText: nextTexts.filter(Boolean).join("\n"),
         },
-        shadowAudio: preserveExistingAudioMapping(document.shadowAudio, size, nextTexts),
+        shadowAudio: preserveExistingAudioMapping(
+          document.shadowAudio,
+          size,
+          nextTexts,
+          buildPairEditorModeByPage(document, size, nextTexts)
+        ),
       };
     });
     setNotice("全部页面文字已保存。");
@@ -1966,7 +2508,12 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
             pages: nextPages,
             shadowPageTexts: nextTexts,
           },
-          shadowAudio: preserveExistingAudioMapping(document.shadowAudio, nextPageCount, nextTexts),
+          shadowAudio: preserveExistingAudioMapping(
+            document.shadowAudio,
+            nextPageCount,
+            nextTexts,
+            buildPairEditorModeByPage(document, nextPageCount, nextTexts)
+          ),
         };
       });
 
@@ -1981,6 +2528,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 
   const handleSaveAudioMapping = (
     pageIndex: number,
+    slot: AudioSegmentSlot,
     trackIndex: number,
     startSec: number,
     endSec: number
@@ -1989,6 +2537,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     applyDocumentUpdate(activeDocument.id, (document) => {
       const tracks = document.shadowAudio?.tracks || [];
       if (!tracks.length) return document;
+      const safeSlot = normalizeAudioSegmentSlot(slot);
       const safeTrackIndex = Math.min(Math.max(0, Math.floor(trackIndex)), tracks.length - 1);
       const trackDuration = Math.max(0, tracks[safeTrackIndex].durationSec || 0);
       const safeStart =
@@ -2008,14 +2557,25 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 
       const existing = document.shadowAudio?.pageSegments || [];
       const nextSegments = [
-        ...existing.filter((segment) => segment.pageIndex !== pageIndex),
+        ...existing.filter(
+          (segment) =>
+            !(
+              segment.pageIndex === pageIndex &&
+              normalizeAudioSegmentSlot(segment.slot) === safeSlot
+            )
+        ),
         {
           pageIndex,
+          slot: safeSlot,
           trackIndex: safeTrackIndex,
           startSec: safeStart,
           endSec: safeEnd,
         },
-      ].sort((left, right) => left.pageIndex - right.pageIndex);
+      ].sort((left, right) => {
+        if (left.pageIndex !== right.pageIndex) return left.pageIndex - right.pageIndex;
+        return AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(left.slot)] -
+          AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(right.slot)];
+      });
 
       return {
         ...document,
@@ -2031,6 +2591,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   const handleSaveAllAudioMappings = (
     mappings: Array<{
       pageIndex: number;
+      slot: AudioSegmentSlot;
       trackIndex: number;
       startSec: number;
       endSec: number;
@@ -2044,6 +2605,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       const nextSegments = mappings
         .map((mapping) => {
           const safePageIndex = Math.max(0, Math.floor(mapping.pageIndex));
+          const safeSlot = normalizeAudioSegmentSlot(mapping.slot);
           const safeTrackIndex = Math.min(
             Math.max(0, Math.floor(mapping.trackIndex)),
             tracks.length - 1
@@ -2071,13 +2633,18 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 
           return {
             pageIndex: safePageIndex,
+            slot: safeSlot,
             trackIndex: safeTrackIndex,
             startSec: safeStart,
             endSec: safeEnd,
           };
         })
         .filter((segment) => Number.isFinite(segment.pageIndex))
-        .sort((left, right) => left.pageIndex - right.pageIndex);
+        .sort((left, right) => {
+          if (left.pageIndex !== right.pageIndex) return left.pageIndex - right.pageIndex;
+          return AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(left.slot)] -
+            AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(right.slot)];
+        });
 
       return {
         ...document,
@@ -2114,6 +2681,12 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     );
 
     try {
+      const pageEntries = buildAudioSlotEntries(
+        size,
+        nextTexts,
+        buildPairEditorModeByPage(activeDocument, size, nextTexts)
+      );
+
       const response = await fetchWithTimeout(
         "/api/storyflow/rematch-audio",
         {
@@ -2123,6 +2696,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           },
           body: JSON.stringify({
             pageTexts: nextTexts,
+            pageEntries,
             tracks: currentTracks,
           }),
         },
@@ -2133,6 +2707,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         | {
             matches?: Array<{
               pageIndex?: number;
+              slot?: AudioSegmentSlot;
               trackIndex?: number;
               startSec?: number;
               endSec?: number;
@@ -2152,6 +2727,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         ? payload.matches
             .map((item) => ({
               pageIndex: Number(item.pageIndex),
+              slot: normalizeAudioSegmentSlot(item.slot),
               trackIndex: Number(item.trackIndex),
               startSec: Number(item.startSec),
               endSec: Number(item.endSec),
@@ -2185,14 +2761,17 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
             trackDuration > 0 ? Math.min(trackDuration, endSec) : endSec;
           return {
             pageIndex: matched.pageIndex,
+            slot: normalizeAudioSegmentSlot(matched.slot),
             trackIndex: safeTrackIndex,
             startSec,
             endSec: Math.max(startSec + 0.2, boundedEnd),
           };
         })
-        .sort(
-          (left, right) => left.pageIndex - right.pageIndex
-        );
+        .sort((left, right) => {
+          if (left.pageIndex !== right.pageIndex) return left.pageIndex - right.pageIndex;
+          return AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(left.slot)] -
+            AUDIO_SLOT_ORDER[normalizeAudioSegmentSlot(right.slot)];
+        });
 
         const nextPages = buildPreviewPagesFromShadowTexts(
           document.analysis.pages || [],
@@ -2260,6 +2839,15 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     insertImageInputRef.current?.click();
   };
 
+  const handleBatchFillImagesTrigger = () => {
+    batchImageInputRef.current?.click();
+  };
+
+  const handleBatchFillTextsTrigger = () => {
+    setBatchTextPasteValue("");
+    setIsBatchTextPasteOpen(true);
+  };
+
   const handleReplacePageImage = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
@@ -2290,15 +2878,12 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         nextPageKeys[replacingPageIndex] = objectKey;
 
         const currentViews = getEffectiveShadowViews(document);
-        const targetViewIndex = currentViews.findIndex((item) =>
+        const targetView = currentViews.find((item) =>
           item.pages.some((page) => page === replacingPageIndex)
         );
-        const targetView = targetViewIndex >= 0 ? currentViews[targetViewIndex] : null;
-        let nextCustomViews = document.customShadowViews;
 
-        // Replace image as spread fill:
-        // - if current page belongs to a spread, replace both sides with same image
-        // - if current page is single, convert that single to a spread view and use same image
+        // When replacing a page image, keep the existing view structure intact.
+        // Only true spreads should mirror the replacement on both sides.
         if (targetView?.kind === "spread") {
           const [leftPage, rightPage] = targetView.pages;
           if (typeof leftPage === "number") {
@@ -2306,25 +2891,6 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           }
           if (typeof rightPage === "number") {
             nextPageKeys[rightPage] = objectKey;
-          }
-          if (typeof leftPage !== "number" || typeof rightPage !== "number") {
-            const normalizedViews = serializeCustomViews(currentViews);
-            if (targetViewIndex >= 0) {
-              normalizedViews[targetViewIndex] = {
-                kind: "spread",
-                pages: [replacingPageIndex, replacingPageIndex],
-              };
-              nextCustomViews = normalizedViews;
-            }
-          }
-        } else {
-          const normalizedViews = serializeCustomViews(currentViews);
-          if (targetViewIndex >= 0) {
-            normalizedViews[targetViewIndex] = {
-              kind: "spread",
-              pages: [replacingPageIndex, replacingPageIndex],
-            };
-            nextCustomViews = normalizedViews;
           }
         }
 
@@ -2343,7 +2909,6 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           thumbnailObjectKey:
             replacingPageIndex === 0 ? objectKey : document.thumbnailObjectKey,
           sourceAssets: nextSourceAssets,
-          customShadowViews: nextCustomViews,
         };
       });
 
@@ -2411,9 +2976,29 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           document.analysis.pages || [],
           nextTexts
         );
+        const nextPairEditorModePages = remapPairEditorModePages(
+          document.pairEditorModePages,
+          Math.max(oldPageKeys.length, oldTexts.length),
+          (enabled) => {
+            const next = [...enabled];
+            next.splice(insertIndex, 0, false);
+            return next;
+          }
+        );
+        const nextPairEditorModeByPage = buildPairEditorModeByFlags(
+          Array.from({ length: nextPageKeys.length }, (_, pageIndex) =>
+            nextPairEditorModePages.includes(pageIndex)
+          ),
+          nextPageKeys.length
+        );
         const nextShadowAudio =
           document.shadowAudio?.tracks?.length
-            ? buildAudioMapping(nextPageKeys.length, nextTexts, document.shadowAudio.tracks)
+            ? buildAudioMapping(
+                nextPageKeys.length,
+                nextTexts,
+                document.shadowAudio.tracks,
+                nextPairEditorModeByPage
+              )
             : document.shadowAudio;
 
         return {
@@ -2421,6 +3006,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           pageObjectKeys: nextPageKeys,
           images: nextImages,
           pageCount: nextPageKeys.length || document.pageCount,
+          pairEditorModePages: nextPairEditorModePages,
           thumbnailObjectKey: nextPageKeys[0] || document.thumbnailObjectKey,
           sourceAssets: [
             ...(document.sourceAssets || []),
@@ -2448,6 +3034,202 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       if (event.target) {
         event.target.value = "";
       }
+    }
+  };
+
+  const handleBatchFillImages = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    try {
+      if (!activeDocument) return;
+      const files = Array.from(event.target.files || []).filter((file) =>
+        file.type.startsWith("image/")
+      );
+      if (!files.length) {
+        throw new Error("请至少选择一张图片。");
+      }
+
+      setError(null);
+      setNotice(`正在批量上传图片：1/${files.length}`);
+      const uploadedItems: Array<{
+        objectKey: string;
+        fileName: string;
+      }> = [];
+
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setNotice(`正在批量上传图片：${index + 1}/${files.length}`);
+        // eslint-disable-next-line no-await-in-loop
+        const dataUrl = await resizeImageFile(file);
+        // eslint-disable-next-line no-await-in-loop
+        const blob = await dataUrlToBlob(dataUrl);
+        // eslint-disable-next-line no-await-in-loop
+        const objectKey = await uploadBlobToCos(
+          `${activeDocument.sourceName || "story"}-batch-page-${index + 1}-${Date.now()}.jpg`,
+          "image/jpeg",
+          blob,
+          "page"
+        );
+        uploadedItems.push({
+          objectKey,
+          fileName: file.name,
+        });
+      }
+
+      applyDocumentUpdate(activeDocument.id, (document) => {
+        const oldPageKeys = [...(document.pageObjectKeys || [])];
+        const oldImages = [...(document.images || [])];
+        const oldTexts = Array.from(
+          {
+            length: Math.max(
+              oldPageKeys.length,
+              document.analysis.shadowPageTexts?.length || 0
+            ),
+          },
+          (_, idx) => document.analysis.shadowPageTexts?.[idx] || ""
+        );
+        const targetPageCount = Math.max(oldPageKeys.length, oldTexts.length, uploadedItems.length);
+        const nextPageKeys = Array.from({ length: targetPageCount }, (_, idx) => oldPageKeys[idx] || "");
+        uploadedItems.forEach((item, index) => {
+          nextPageKeys[index] = item.objectKey;
+        });
+
+        const nextImages = oldImages.length
+          ? Array.from({ length: targetPageCount }, (_, idx) => oldImages[idx] || "")
+          : oldImages;
+        const nextTexts = Array.from({ length: targetPageCount }, (_, idx) => oldTexts[idx] || "");
+        const nextPages = buildPreviewPagesFromShadowTexts(
+          document.analysis.pages || [],
+          nextTexts
+        );
+        const nextPairEditorModePages = remapPairEditorModePages(
+          document.pairEditorModePages,
+          Math.max(oldPageKeys.length, oldTexts.length),
+          (enabled) => {
+            const next = [...enabled];
+            while (next.length < targetPageCount) next.push(false);
+            return next;
+          }
+        );
+        const nextPairEditorModeByPage = buildPairEditorModeByFlags(
+          Array.from({ length: targetPageCount }, (_, pageIndex) =>
+            nextPairEditorModePages.includes(pageIndex)
+          ),
+          targetPageCount
+        );
+        const nextShadowAudio =
+          document.shadowAudio?.tracks?.length
+            ? buildAudioMapping(
+                targetPageCount,
+                nextTexts,
+                document.shadowAudio.tracks,
+                nextPairEditorModeByPage
+              )
+            : document.shadowAudio;
+
+        return {
+          ...document,
+          pageObjectKeys: nextPageKeys,
+          images: nextImages,
+          pageCount: targetPageCount,
+          pairEditorModePages: nextPairEditorModePages,
+          thumbnailObjectKey: nextPageKeys[0] || document.thumbnailObjectKey,
+          sourceAssets: [
+            ...(document.sourceAssets || []),
+            ...uploadedItems.map((item) => ({
+              fileName: item.fileName,
+              mimeType: "image/jpeg",
+              objectKey: item.objectKey,
+            })),
+          ],
+          customShadowViews: undefined,
+          analysis: {
+            ...document.analysis,
+            pages: nextPages,
+            shadowPageTexts: nextTexts,
+          },
+          shadowAudio: nextShadowAudio,
+        };
+      });
+
+      setNotice(
+        uploadedItems.length >= (activeDocument.pageObjectKeys?.length || 0)
+          ? `已按顺序填充 ${uploadedItems.length} 张图片，页面已同步补齐。`
+          : `已按顺序替换前 ${uploadedItems.length} 页图片。`
+      );
+    } catch (batchError) {
+      setError(batchError instanceof Error ? batchError.message : "批量填充图片失败");
+    } finally {
+      if (event.target) {
+        event.target.value = "";
+      }
+    }
+  };
+
+  const handleBatchFillTexts = async (rawContent: string) => {
+    try {
+      if (!activeDocument) return;
+      const normalizedContent = rawContent.trim();
+      if (!normalizedContent) {
+        throw new Error("请先粘贴要导入的文本内容");
+      }
+
+      setError(null);
+      setNotice("正在导入页面文字...");
+      const importedTexts = parseImportedPageTexts(normalizedContent);
+      if (!importedTexts.length) {
+        throw new Error("文本文件中没有可导入的页面内容");
+      }
+
+      applyDocumentUpdate(activeDocument.id, (document) => {
+        const size = Math.max(
+          document.pageObjectKeys?.length || 0,
+          document.analysis.shadowPageTexts?.length || 0,
+          importedTexts.length
+        );
+        const nextTexts = Array.from({ length: size }, (_, idx) =>
+          (document.analysis.shadowPageTexts?.[idx] || "").trim()
+        );
+        let textCursor = 0;
+        Array.from({ length: size }, (_, pageIndex) => pageIndex).forEach((pageIndex) => {
+          if (textCursor >= importedTexts.length) return;
+          if (pairEditorModeByPageRef.current[pageIndex]) {
+            const leftText = importedTexts[textCursor]?.trim() || "";
+            const rightText = importedTexts[textCursor + 1]?.trim() || "";
+            if (!leftText && !rightText) return;
+            nextTexts[pageIndex] = joinDualPageText(leftText, rightText);
+            textCursor += rightText ? 2 : 1;
+            return;
+          }
+
+          nextTexts[pageIndex] = importedTexts[textCursor].trim();
+          textCursor += 1;
+        });
+        const nextPages = buildPreviewPagesFromShadowTexts(document.analysis.pages || [], nextTexts);
+
+        return {
+          ...document,
+          analysis: {
+            ...document.analysis,
+            pages: nextPages,
+            shadowPageTexts: nextTexts,
+            fullText: nextTexts.filter(Boolean).join("\n"),
+          },
+          shadowAudio: preserveExistingAudioMapping(
+            document.shadowAudio,
+            size,
+            nextTexts,
+            buildPairEditorModeByPage(document, size, nextTexts)
+          ),
+        };
+      });
+
+      setNotice(`已按顺序导入 ${Math.min(importedTexts.length, activeDocument.pageObjectKeys?.length || importedTexts.length)} 页文字。`);
+      setIsBatchTextPasteOpen(false);
+      setBatchTextPasteValue("");
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "导入页面文字失败");
+      setNotice(null);
     }
   };
 
@@ -2490,7 +3272,12 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       );
       const nextShadowAudio =
         document.shadowAudio?.tracks?.length
-          ? buildAudioMapping(nextPageKeys.length, nextTexts, document.shadowAudio.tracks)
+          ? buildAudioMapping(
+              nextPageKeys.length,
+              nextTexts,
+              document.shadowAudio.tracks,
+              buildPairEditorModeByPage(document, nextPageKeys.length, nextTexts)
+            )
           : document.shadowAudio;
 
       return {
@@ -2498,6 +3285,17 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         pageObjectKeys: nextPageKeys,
         images: nextImages,
         pageCount: nextPageKeys.length || document.pageCount,
+        pairEditorModePages: remapPairEditorModePages(
+          document.pairEditorModePages,
+          Math.max(oldPageKeys.length, oldTexts.length),
+          (enabled) => {
+            const next = [...enabled];
+            if (next.length > pageIndex) {
+              next.splice(pageIndex, 1);
+            }
+            return next;
+          }
+        ),
         thumbnailObjectKey: nextPageKeys[0] || document.thumbnailObjectKey,
         customShadowViews: undefined,
         analysis: {
@@ -2510,6 +3308,73 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     });
     setNotice(`第 ${pageIndex + 1} 页已删除。`);
     setShadowViewIndex(0);
+  };
+
+  const handleAppendBlankPage = () => {
+    if (!activeDocument) {
+      return 0;
+    }
+
+    const updated = applyDocumentUpdate(activeDocument.id, (document) => {
+      const oldPageKeys = [...(document.pageObjectKeys || [])];
+      const oldImages = [...(document.images || [])];
+      const oldTexts = Array.from(
+        {
+          length: Math.max(
+            oldPageKeys.length,
+            document.analysis.shadowPageTexts?.length || 0
+          ),
+        },
+        (_, idx) => document.analysis.shadowPageTexts?.[idx] || ""
+      );
+
+      const nextPageKeys = [...oldPageKeys, ""];
+      const nextImages = oldImages.length ? [...oldImages, ""] : oldImages;
+      const nextTexts = [...oldTexts, ""];
+      const nextPages = buildPreviewPagesFromShadowTexts(
+        document.analysis.pages || [],
+        nextTexts
+      );
+      const nextShadowAudio = preserveExistingAudioMapping(
+        document.shadowAudio,
+        nextPageKeys.length,
+        nextTexts,
+        buildPairEditorModeByPage(document, nextPageKeys.length, nextTexts)
+      );
+      const currentViews = getEffectiveShadowViews(document);
+
+      return {
+        ...document,
+        pageObjectKeys: nextPageKeys,
+        images: nextImages,
+        pageCount: nextPageKeys.length,
+        pairEditorModePages: remapPairEditorModePages(
+          document.pairEditorModePages,
+          Math.max(oldPageKeys.length, oldTexts.length),
+          (enabled) => [...enabled, false]
+        ),
+        customShadowViews: document.customShadowViews?.length
+          ? serializeCustomViews([
+              ...currentViews,
+              { kind: "single", pages: [nextPageKeys.length - 1] },
+            ])
+          : undefined,
+        analysis: {
+          ...document.analysis,
+          pages: nextPages,
+          shadowPageTexts: nextTexts,
+          fullText: nextTexts.filter(Boolean).join("\n"),
+        },
+        shadowAudio: nextShadowAudio,
+      };
+    });
+
+    if (!updated) {
+      return activeDocument.pageObjectKeys?.length || activeDocument.pageCount || 0;
+    }
+
+    setNotice("已在末尾自动补充 1 个空白页。");
+    return updated.pageObjectKeys?.length || updated.pageCount || 0;
   };
 
   const handleSplitView = (viewIndex: number) => {
@@ -2703,6 +3568,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       const pageObjectKeys: string[] = [];
       const previewPageObjectKeys: string[] = [];
       const providedShadowPageTexts: string[] = [];
+      const fallbackPreviewImages: string[] = [];
 
       for (const asset of pendingAssets) {
         const sourceObjectKey = await uploadBlobToCos(
@@ -2729,6 +3595,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
             pdfPayload.pageTexts
           );
           pageObjectKeys.push(...filteredPdf.objectKeys);
+          fallbackPreviewImages.push(...pdfPayload.previewImages);
           previewPageObjectKeys.push(
             ...filteredPdf.objectKeys.slice(0, MAX_PREVIEW_PAGES)
           );
@@ -2746,6 +3613,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               "page"
             );
             pageObjectKeys.push(pageObjectKey);
+            fallbackPreviewImages.push(previewImage);
             providedShadowPageTexts.push("");
             if (previewPageObjectKeys.length < MAX_PREVIEW_PAGES) {
               previewPageObjectKeys.push(pageObjectKey);
@@ -2812,6 +3680,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       const saved = saveTeacherStoryflowDocument(session.username, {
         sourceName: sourceName.trim() || normalizedPayload.title || "未命名绘本",
         thumbnailObjectKey: pageObjectKeys[0],
+        images: fallbackPreviewImages,
         pageObjectKeys,
         sourceAssets,
         analysis: normalizedPayload,
@@ -2846,6 +3715,35 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       setNotice(null);
     } finally {
       setIsAnalyzing(false);
+    }
+  };
+
+  const handleCreateManualDocument = () => {
+    const normalizedPageCount = Math.max(1, Math.min(20, Math.floor(manualPageCount || 0)));
+    const normalizedSourceName = sourceName.trim() || "未命名绘本";
+    const analysis = createManualStoryflowAnalysis(normalizedSourceName, normalizedPageCount);
+    const blankPageKeys = Array.from({ length: normalizedPageCount }, () => "");
+
+    try {
+      const saved = saveTeacherStoryflowDocument(session.username, {
+        sourceName: normalizedSourceName,
+        pageObjectKeys: blankPageKeys,
+        analysis,
+      });
+
+      const next = getTeacherStoryflowDocuments(session.username);
+      setDocuments(next);
+      setActiveId(saved.id);
+      setActiveTab("mindmap");
+      setPendingAssets([]);
+      setPendingAudioAssets([]);
+      setError(null);
+      setNotice("已创建空白任务，请继续上传页面图片并编辑文本内容。");
+      setIsEditorOpen(true);
+      setIsSidePanelOpen(false);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "创建空白任务失败");
+      setNotice(null);
     }
   };
 
@@ -2949,6 +3847,69 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     setNotice(`看图说话练习已记录，评级 ${record.ratingLabel}。`);
   };
 
+  const handleSaveMetadata = (nextMetadata: {
+    title: string;
+    summary: string;
+    characters: string[];
+    time: string;
+    place: string;
+    keywords: string[];
+    mindMapBeginning: string[];
+    mindMapMiddle: string[];
+    mindMapEnd: string[];
+    originalText: string;
+  }) => {
+    if (!activeDocument) return;
+
+    applyDocumentUpdate(activeDocument.id, (document) => {
+      const importedPageTexts = nextMetadata.originalText.trim()
+        ? parseImportedPageTexts(nextMetadata.originalText)
+        : [];
+      const nextShadowTexts = importedPageTexts.length
+        ? Array.from(
+            {
+              length: Math.max(
+                document.pageObjectKeys?.length || 0,
+                document.analysis.shadowPageTexts?.length || 0,
+                importedPageTexts.length
+              ),
+            },
+            (_, index) => importedPageTexts[index]?.trim() ?? document.analysis.shadowPageTexts?.[index] ?? ""
+          )
+        : document.analysis.shadowPageTexts;
+      const nextPages = nextShadowTexts
+        ? buildPreviewPagesFromShadowTexts(document.analysis.pages || [], nextShadowTexts)
+        : document.analysis.pages;
+
+      return {
+        ...document,
+        sourceName: nextMetadata.title || document.sourceName,
+        analysis: {
+          ...document.analysis,
+          title: nextMetadata.title || document.analysis.title || document.sourceName,
+          summary: nextMetadata.summary,
+          characters: nextMetadata.characters,
+          setting: {
+            time: nextMetadata.time,
+            place: nextMetadata.place,
+          },
+          keywords: nextMetadata.keywords,
+          mindMap: {
+            beginning: nextMetadata.mindMapBeginning,
+            middle: nextMetadata.mindMapMiddle,
+            end: nextMetadata.mindMapEnd,
+          },
+          pages: nextPages,
+          shadowPageTexts: nextShadowTexts,
+          fullText: nextShadowTexts ? nextShadowTexts.filter(Boolean).join("\n") : document.analysis.fullText,
+        },
+      };
+    });
+    setSourceName(nextMetadata.title || activeDocument.sourceName);
+    setNotice("资料信息已保存。");
+    setIsMetaEditorOpen(false);
+  };
+
   const handlePublishStoryflow = () => {
     if (!activeDocument) return;
     if (!selectedPublishStudents.length) {
@@ -2977,6 +3938,8 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         <SidePanel
           sourceName={sourceName}
           setSourceName={setSourceName}
+          manualPageCount={manualPageCount}
+          setManualPageCount={setManualPageCount}
           fileInputRef={fileInputRef}
           audioInputRef={audioInputRef}
           pendingImages={pendingImages}
@@ -2993,6 +3956,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
             void handleAttachPendingAudio();
           }}
           onAnalyze={handleAnalyze}
+          onCreateManualDocument={handleCreateManualDocument}
           onSelectDocument={(id) => {
             setActiveId(id);
             setActiveTab("mindmap");
@@ -3044,6 +4008,13 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
                     className="rounded-full bg-white/75 px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-white"
                   >
                     页面编辑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsMetaEditorOpen(true)}
+                    className="rounded-full bg-white/75 px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-white"
+                  >
+                    编辑资料信息
                   </button>
                   <button
                     type="button"
@@ -3309,7 +4280,16 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           void handleInsertPageImage(event);
         }}
       />
-
+      <input
+        ref={batchImageInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          void handleBatchFillImages(event);
+        }}
+      />
       {isEditorOpen && activeDocument ? (
         <div className="fixed inset-0 z-[60]">
           <button
@@ -3328,15 +4308,143 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               onSavePageText={handleSavePageText}
               onSaveAllPageTexts={handleSaveAllPageTexts}
               onRecognizeTexts={handleRecognizeTexts}
+              onGenerateSpeakingHints={handleGenerateSpeakingHints}
               onSaveAudioMapping={handleSaveAudioMapping}
               onSaveAllAudioMappings={handleSaveAllAudioMappings}
               onRematchAudioWithTexts={handleRematchAudioWithTexts}
+              onBatchFillImages={handleBatchFillImagesTrigger}
+              onBatchFillTexts={handleBatchFillTextsTrigger}
               onReplaceImage={handleReplacePageImageTrigger}
               onInsertPage={handleInsertPageImageTrigger}
               onDeletePage={handleDeletePage}
+              onAppendBlankPage={handleAppendBlankPage}
               onSplitView={handleSplitView}
               onMergeView={handleMergeWithNextView}
+              onSetPairEditorMode={(pageIndex, enabled, nextText) => {
+                if (!activeDocument) return;
+                const pageCount = Math.max(
+                  activeDocument.pageObjectKeys?.length || 0,
+                  activeDocument.pageCount || 0,
+                  activeDocument.analysis.shadowPageTexts?.length || 0
+                );
+                const nextPairEditorModeByPage = {
+                  ...pairEditorModeByPageRef.current,
+                  [pageIndex]: enabled,
+                };
+                if (!enabled) {
+                  delete nextPairEditorModeByPage[pageIndex];
+                }
+                pairEditorModeByPageRef.current = nextPairEditorModeByPage;
+                applyDocumentUpdate(activeDocument.id, (document) => {
+                  const size = Math.max(
+                    document.pageObjectKeys?.length || 0,
+                    document.pageCount || 0,
+                    document.analysis.shadowPageTexts?.length || 0,
+                    pageIndex + 1
+                  );
+                  const nextTexts = Array.from({ length: size }, (_, index) =>
+                    document.analysis.shadowPageTexts?.[index] || ""
+                  );
+                  if (typeof nextText === "string") {
+                    nextTexts[pageIndex] = nextText.trim();
+                  }
+                  const nextPages = buildPreviewPagesFromShadowTexts(
+                    document.analysis.pages || [],
+                    nextTexts
+                  );
+                  return {
+                    ...document,
+                    pairEditorModePages: serializePairEditorModePages(
+                      nextPairEditorModeByPage,
+                      size
+                    ),
+                    analysis: {
+                      ...document.analysis,
+                      pages: nextPages,
+                      shadowPageTexts: nextTexts,
+                    },
+                    shadowAudio: preserveExistingAudioMapping(
+                      document.shadowAudio,
+                      size,
+                      nextTexts,
+                      nextPairEditorModeByPage
+                    ),
+                  };
+                });
+              }}
               onClose={() => setIsEditorOpen(false)}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {isBatchTextPasteOpen ? (
+        <div className="fixed inset-0 z-[70]">
+          <button
+            type="button"
+            aria-label="close batch text paste overlay"
+            onClick={() => setIsBatchTextPasteOpen(false)}
+            className="absolute inset-0 bg-slate-900/45"
+          />
+          <div className="absolute inset-x-0 top-16 mx-auto w-[min(780px,94vw)] overflow-hidden rounded-[1.8rem] border border-white/60 bg-white shadow-[0_30px_80px_rgba(15,23,42,0.32)]">
+            <div className="border-b border-slate-200 px-6 py-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-500">
+                Batch Paste
+              </p>
+              <h3 className="mt-2 text-3xl font-black text-slate-900">批量粘贴文本</h3>
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                直接粘贴整段文本，系统会按页码、段落或双文本顺序自动填入页面编辑器。
+              </p>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              <textarea
+                value={batchTextPasteValue}
+                onChange={(event) => setBatchTextPasteValue(event.target.value)}
+                rows={18}
+                className="w-full rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-7 text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+                placeholder={"请直接粘贴文本内容。\n支持 Page 1 / 第1页 / 空行分段 等格式。"}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs leading-5 text-slate-500">
+                  如果当前页已开启“左右双文本”，系统会自动按 Left Page / Right Page 顺序连续填充两段文字。
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsBatchTextPasteOpen(false)}
+                    className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleBatchFillTexts(batchTextPasteValue);
+                    }}
+                    className="rounded-full bg-sky-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-sky-500"
+                  >
+                    识别并填入
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isMetaEditorOpen && activeDocument ? (
+        <div className="fixed inset-0 z-[60]">
+          <button
+            type="button"
+            aria-label="close metadata editor overlay"
+            onClick={() => setIsMetaEditorOpen(false)}
+            className="absolute inset-0 bg-slate-900/45"
+          />
+          <div className="absolute inset-x-0 top-10 mx-auto w-[min(820px,94vw)] overflow-hidden rounded-[1.8rem] border border-white/60 bg-white shadow-[0_30px_80px_rgba(15,23,42,0.32)]">
+            <MetadataEditorPanel
+              document={activeDocument}
+              onSave={handleSaveMetadata}
+              onClose={() => setIsMetaEditorOpen(false)}
             />
           </div>
         </div>
@@ -3364,6 +4472,8 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
             <SidePanel
               sourceName={sourceName}
               setSourceName={setSourceName}
+              manualPageCount={manualPageCount}
+              setManualPageCount={setManualPageCount}
               fileInputRef={fileInputRef}
               audioInputRef={audioInputRef}
               pendingImages={pendingImages}
@@ -3386,6 +4496,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               onAnalyze={() => {
                 void handleAnalyze();
               }}
+              onCreateManualDocument={handleCreateManualDocument}
               onSelectDocument={(id) => {
                 setActiveId(id);
                 setActiveTab("mindmap");
@@ -3408,14 +4519,19 @@ const PageEditorPanel = ({
   onSavePageText,
   onSaveAllPageTexts,
   onRecognizeTexts,
+  onGenerateSpeakingHints,
   onSaveAudioMapping,
   onSaveAllAudioMappings,
   onRematchAudioWithTexts,
+  onBatchFillImages,
+  onBatchFillTexts,
   onReplaceImage,
   onInsertPage,
   onDeletePage,
+  onAppendBlankPage,
   onSplitView,
   onMergeView,
+  onSetPairEditorMode,
   onClose,
 }: {
   document: StoryflowDocument;
@@ -3426,8 +4542,10 @@ const PageEditorPanel = ({
   onSavePageText: (pageIndex: number, text: string) => void;
   onSaveAllPageTexts: (texts: string[]) => void;
   onRecognizeTexts: () => Promise<void>;
+  onGenerateSpeakingHints: (texts: string[]) => void;
   onSaveAudioMapping: (
     pageIndex: number,
+    slot: AudioSegmentSlot,
     trackIndex: number,
     startSec: number,
     endSec: number
@@ -3435,6 +4553,7 @@ const PageEditorPanel = ({
   onSaveAllAudioMappings: (
     mappings: Array<{
       pageIndex: number;
+      slot: AudioSegmentSlot;
       trackIndex: number;
       startSec: number;
       endSec: number;
@@ -3443,11 +4562,15 @@ const PageEditorPanel = ({
   onRematchAudioWithTexts: (
     texts: string[]
   ) => Promise<StoryflowRematchDiagnostics | null> | StoryflowRematchDiagnostics | null;
+  onBatchFillImages: () => void;
+  onBatchFillTexts: () => void;
   onReplaceImage: (pageIndex: number) => void;
   onInsertPage: (pageIndex: number) => void;
   onDeletePage: (pageIndex: number) => void;
+  onAppendBlankPage: () => number;
   onSplitView: (viewIndex: number) => void;
   onMergeView: (viewIndex: number) => void;
+  onSetPairEditorMode: (pageIndex: number, enabled: boolean, nextText?: string) => void;
   onClose: () => void;
 }) => {
   const pageCount = document.pageObjectKeys?.length || document.pageCount || 0;
@@ -3455,20 +4578,24 @@ const PageEditorPanel = ({
     () => buildResolvedShadowTexts(document.analysis, pageCount),
     [document.analysis, pageCount]
   );
+  const dualTextModeByPage = useMemo(
+    () => buildPairEditorModeByPage(document, pageCount, shadowTexts),
+    [document, pageCount, shadowTexts]
+  );
 
   const [draftTexts, setDraftTexts] = useState<string[]>(shadowTexts);
-  const audioTracks = document.shadowAudio?.tracks || [];
+  const audioTracks = document.shadowAudio?.tracks ?? EMPTY_AUDIO_TRACKS;
   const [draftAudioMap, setDraftAudioMap] = useState<
-    Record<number, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>
+    Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>
   >({});
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewCleanupRef = useRef<(() => void) | null>(null);
   const [audioPreviewState, setAudioPreviewState] = useState<{
-    pageIndex: number | null;
+    slotKey: string | null;
     currentSec: number;
     isPlaying: boolean;
   }>({
-    pageIndex: null,
+    slotKey: null,
     currentSec: 0,
     isPlaying: false,
   });
@@ -3481,10 +4608,24 @@ const PageEditorPanel = ({
   const [rematchDiagnostics, setRematchDiagnostics] = useState<StoryflowRematchDiagnostics | null>(
     null
   );
+  const [pairEditorModeByPage, setPairEditorModeByPage] = useState<Record<number, boolean>>(() =>
+    dualTextModeByPage
+  );
+  const [isViewManagerCollapsed, setIsViewManagerCollapsed] = useState(false);
   const hasAnyDraftText = draftTexts.some((item) => item.trim().length > 0);
+  const spreadPositionByPage = useMemo(() => {
+    const next = new Map<number, "left" | "right">();
+    views.forEach((view) => {
+      if (view.kind !== "spread") return;
+      const [left, right] = view.pages;
+      if (typeof left === "number") next.set(left, "left");
+      if (typeof right === "number" && right !== left) next.set(right, "right");
+    });
+    return next;
+  }, [views]);
 
   useEffect(() => {
-    setDraftTexts(shadowTexts);
+    setDraftTexts((current) => (areStringArraysEqual(current, shadowTexts) ? current : shadowTexts));
   }, [shadowTexts, document.id]);
 
   useEffect(() => {
@@ -3492,22 +4633,29 @@ const PageEditorPanel = ({
   }, [document.id]);
 
   useEffect(() => {
+    setPairEditorModeByPage(dualTextModeByPage);
+  }, [dualTextModeByPage]);
+
+  useEffect(() => {
     const existingSegments = document.shadowAudio?.pageSegments || [];
-    const segments = existingSegments;
-    const segmentByPage = new Map<number, (typeof segments)[number]>();
+    const segments = existingSegments.map((segment) => ({
+      ...segment,
+      slot: normalizeAudioSegmentSlot(segment.slot),
+    }));
+    const segmentByKey = new Map<string, (typeof segments)[number]>();
     segments.forEach((segment) => {
-      segmentByPage.set(segment.pageIndex, segment);
+      segmentByKey.set(getAudioSlotKey(segment.pageIndex, segment.slot), segment);
     });
 
-    const nextDraft: Record<number, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }> = {};
-    Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).forEach((pageIndex) => {
-      const fromSegment = segmentByPage.get(pageIndex);
+    const nextDraft: Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }> = {};
+    buildAudioSlotEntries(pageCount, shadowTexts, dualTextModeByPage).forEach((entry) => {
+      const fromSegment = segmentByKey.get(getAudioSlotKey(entry.pageIndex, entry.slot));
       const trackIndex = fromSegment?.trackIndex ?? 0;
       const duration = audioTracks[trackIndex]?.durationSec || 0;
       const startSec = fromSegment?.startSec ?? 0;
       const endSec = fromSegment?.endSec ?? startSec;
 
-      nextDraft[pageIndex] = {
+      nextDraft[getAudioSlotKey(entry.pageIndex, entry.slot)] = {
         trackIndex,
         startSec: Number.isFinite(startSec) ? String(startSec.toFixed(2)) : "0",
         endSec: Number.isFinite(endSec)
@@ -3516,15 +4664,76 @@ const PageEditorPanel = ({
         hasSegment: Boolean(fromSegment),
       };
     });
-    setDraftAudioMap(nextDraft);
+    setDraftAudioMap((current) => (areDraftAudioMapsEqual(current, nextDraft) ? current : nextDraft));
   }, [
     document.shadowAudio?.pageSegments,
     document.shadowAudio?.tracks,
     pageCount,
     document.id,
-    shadowTexts,
     audioTracks,
+    shadowTexts,
+    dualTextModeByPage,
   ]);
+
+  const shiftDraftTextsForwardFrom = (
+    pageIndex: number,
+    slot: "single" | "left" | "right"
+  ) => {
+    const slotRefs: Array<{ pageIndex: number; slot: "single" | "left" | "right" }> = [];
+    const slotValues: string[] = [];
+
+    for (let index = 0; index < pageCount; index += 1) {
+      const pageText = draftTexts[index] || "";
+      if (pairEditorModeByPage[index]) {
+        const { leftText, rightText } = splitDualPageText(pageText);
+        slotRefs.push({ pageIndex: index, slot: "left" });
+        slotValues.push(leftText);
+        slotRefs.push({ pageIndex: index, slot: "right" });
+        slotValues.push(rightText);
+      } else {
+        slotRefs.push({ pageIndex: index, slot: "single" });
+        slotValues.push(pageText);
+      }
+    }
+
+    const startSlotIndex = slotRefs.findIndex(
+      (item) => item.pageIndex === pageIndex && item.slot === slot
+    );
+    if (startSlotIndex < 0) return;
+
+    const shouldAppendBlankPage = slotValues.some((value) => value.trim()) &&
+      Boolean(slotValues[slotValues.length - 1]?.trim());
+    const targetPageCount = shouldAppendBlankPage
+      ? Math.max(pageCount + 1, onAppendBlankPage())
+      : pageCount;
+
+    if (shouldAppendBlankPage) {
+      slotRefs.push({ pageIndex: targetPageCount - 1, slot: "single" });
+      slotValues.push("");
+    }
+
+    const nextSlotValues = [...slotValues];
+    for (let index = nextSlotValues.length - 1; index > startSlotIndex; index -= 1) {
+      nextSlotValues[index] = slotValues[index - 1];
+    }
+    nextSlotValues[startSlotIndex] = "";
+
+    let cursor = 0;
+    const nextTexts = Array.from({ length: targetPageCount }, (_, index) => {
+      if (pairEditorModeByPage[index]) {
+        const leftText = nextSlotValues[cursor] || "";
+        const rightText = nextSlotValues[cursor + 1] || "";
+        cursor += 2;
+        return joinDualPageText(leftText, rightText);
+      }
+
+      const nextValue = nextSlotValues[cursor] || "";
+      cursor += 1;
+      return nextValue;
+    });
+
+    setDraftTexts(nextTexts);
+  };
 
   const stopPreviewAudio = () => {
     if (previewCleanupRef.current) {
@@ -3554,8 +4763,11 @@ const PageEditorPanel = ({
     return Number.isFinite(numeric) ? numeric : fallback;
   };
 
-  const normalizeAudioDraftForPage = (pageIndex: number) => {
-    const draft = draftAudioMap[pageIndex];
+  const normalizeAudioDraftForSlot = (
+    pageIndex: number,
+    slot: AudioSegmentSlot
+  ) => {
+    const draft = draftAudioMap[getAudioSlotKey(pageIndex, slot)];
     const safeTrackIndex = Math.max(
       0,
       Math.min((draft?.trackIndex ?? 0), Math.max(0, audioTracks.length - 1))
@@ -3583,10 +4795,13 @@ const PageEditorPanel = ({
     };
   };
 
-  const diagnosticByPage = useMemo(
+  const diagnosticBySlot = useMemo(
     () =>
       new Map(
-        (rematchDiagnostics?.pages || []).map((item) => [item.pageIndex, item] as const)
+        (rematchDiagnostics?.pages || []).map((item) => [
+          getAudioSlotKey(item.pageIndex, normalizeAudioSegmentSlot(item.slot)),
+          item,
+        ] as const)
       ),
     [rematchDiagnostics]
   );
@@ -3599,16 +4814,14 @@ const PageEditorPanel = ({
     [rematchDiagnostics]
   );
 
-  const handlePreviewSegment = (pageIndex: number) => {
-    const { safeTrackIndex, start, end, hasSegment } = normalizeAudioDraftForPage(pageIndex);
+  const handlePreviewSegment = (pageIndex: number, slot: AudioSegmentSlot) => {
+    const slotKey = getAudioSlotKey(pageIndex, slot);
+    const { safeTrackIndex, start, end, hasSegment } = normalizeAudioDraftForSlot(pageIndex, slot);
     if (!hasSegment) return;
     const url = getDocumentAudioTrackUrl(document, safeTrackIndex);
     if (!url) return;
 
-    if (
-      audioPreviewState.isPlaying &&
-      audioPreviewState.pageIndex === pageIndex
-    ) {
+    if (audioPreviewState.isPlaying && audioPreviewState.slotKey === slotKey) {
       stopPreviewAudio();
       return;
     }
@@ -3620,7 +4833,7 @@ const PageEditorPanel = ({
     audio.muted = false;
     previewAudioRef.current = audio;
     setAudioPreviewState({
-      pageIndex,
+      slotKey,
       currentSec: start,
       isPlaying: true,
     });
@@ -3643,7 +4856,7 @@ const PageEditorPanel = ({
     const onTimeUpdate = () => {
       const current = Math.max(start, audio.currentTime);
       setAudioPreviewState((prev) =>
-        prev.pageIndex === pageIndex
+        prev.slotKey === slotKey
           ? { ...prev, currentSec: current }
           : prev
       );
@@ -3683,13 +4896,14 @@ const PageEditorPanel = ({
     }
   };
 
-  const handleSeekPreview = (pageIndex: number, targetSec: number) => {
+  const handleSeekPreview = (pageIndex: number, slot: AudioSegmentSlot, targetSec: number) => {
+    const slotKey = getAudioSlotKey(pageIndex, slot);
     setAudioPreviewState((current) =>
-      current.pageIndex === pageIndex
+      current.slotKey === slotKey
         ? { ...current, currentSec: targetSec }
         : current
     );
-    if (previewAudioRef.current && audioPreviewState.pageIndex === pageIndex) {
+    if (previewAudioRef.current && audioPreviewState.slotKey === slotKey) {
       previewAudioRef.current.currentTime = targetSec;
     }
   };
@@ -3763,19 +4977,308 @@ const PageEditorPanel = ({
   };
 
   const handleSaveAllAudio = () => {
-    const mappings = Array.from({ length: pageCount }, (_, pageIndex) => {
-      const { safeTrackIndex, start, end, hasSegment } = normalizeAudioDraftForPage(pageIndex);
-      return {
-        pageIndex,
-        trackIndex: safeTrackIndex,
-        startSec: start,
-        endSec: end,
-        hasSegment,
-      };
-    })
+    const mappings = buildAudioSlotEntries(pageCount, draftTexts, pairEditorModeByPage)
+      .map(({ pageIndex, slot }) => {
+        const { safeTrackIndex, start, end, hasSegment } = normalizeAudioDraftForSlot(pageIndex, slot);
+        return {
+          pageIndex,
+          slot,
+          trackIndex: safeTrackIndex,
+          startSec: start,
+          endSec: end,
+          hasSegment,
+        };
+      })
       .filter((item) => item.hasSegment)
       .map(({ hasSegment: _hasSegment, ...mapping }) => mapping);
     onSaveAllAudioMappings(mappings);
+  };
+
+  const renderAudioMappingEditor = (
+    pageIndex: number,
+    slot: AudioSegmentSlot,
+    options: {
+      title: string;
+      toneClass: string;
+      borderClass: string;
+      sliderClass: string;
+      saveLabel: string;
+    }
+  ) => {
+    const slotKey = getAudioSlotKey(pageIndex, slot);
+    const draft = draftAudioMap[slotKey];
+    const trackIndex = draft?.trackIndex ?? 0;
+    const duration = Math.max(0, audioTracks[trackIndex]?.durationSec || 0);
+    const start = Math.max(
+      0,
+      Math.min(Number(draft?.startSec ?? 0), duration || Number(draft?.startSec ?? 0))
+    );
+    const end = Math.max(
+      start + 0.05,
+      Math.min(Number(draft?.endSec ?? duration), duration || Number(draft?.endSec ?? duration))
+    );
+    const progressValue =
+      audioPreviewState.slotKey === slotKey ? audioPreviewState.currentSec : start;
+    const canPreview =
+      Boolean(draft?.hasSegment) && Boolean(getDocumentAudioTrackUrl(document, trackIndex));
+    const timelineMax =
+      duration > 0
+        ? duration
+        : Math.max(end + DEFAULT_AUDIO_SEGMENT_SEC, start + DEFAULT_AUDIO_SEGMENT_SEC, 10);
+    const segmentWidthPercent =
+      duration > 0 ? Math.max(1, ((end - start) / duration) * 100) : 0;
+    const segmentOffsetPercent = duration > 0 ? (start / duration) * 100 : 0;
+
+    return (
+      <div className={`rounded-xl border bg-white p-3 ${options.borderClass}`}>
+        <div className="flex items-center justify-between gap-2">
+          <p className={`text-xs font-semibold uppercase tracking-[0.14em] ${options.toneClass}`}>
+            {options.title}
+          </p>
+          <button
+            type="button"
+            onClick={() =>
+              onSaveAudioMapping(pageIndex, slot, trackIndex, start, end)
+            }
+            className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700"
+          >
+            {options.saveLabel}
+          </button>
+        </div>
+        <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px_110px_auto] sm:items-center">
+          <select
+            value={trackIndex}
+            onChange={(event) => {
+              const nextTrackIndex = Number(event.target.value);
+              const nextDuration = audioTracks[nextTrackIndex]?.durationSec || 0;
+              setDraftAudioMap((current) => ({
+                ...current,
+                [slotKey]: {
+                  trackIndex: nextTrackIndex,
+                  startSec: current[slotKey]?.startSec ?? "0.00",
+                  endSec: current[slotKey]?.endSec ?? nextDuration.toFixed(2),
+                  hasSegment: current[slotKey]?.hasSegment ?? false,
+                },
+              }));
+            }}
+            className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
+          >
+            {audioTracks.map((track, nextTrackIndex) => (
+              <option key={`${track.fileName}-${nextTrackIndex}`} value={nextTrackIndex}>
+                {track.fileName}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={draft?.startSec ?? "0.00"}
+            onChange={(event) => {
+              const value = event.target.value;
+              const nextStart = Math.max(0, Math.min(Number(value || 0), duration));
+              const currentEnd = Number(draft?.endSec ?? duration);
+              const nextEnd = Math.max(nextStart + 0.05, currentEnd);
+              setDraftAudioMap((current) => ({
+                ...current,
+                [slotKey]: {
+                  trackIndex,
+                  startSec: nextStart.toFixed(2),
+                  endSec: nextEnd.toFixed(2),
+                  hasSegment: true,
+                },
+              }));
+            }}
+            className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
+            placeholder="start"
+          />
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={draft?.endSec ?? "0.00"}
+            onChange={(event) => {
+              const value = event.target.value;
+              const currentStart = Number(draft?.startSec ?? 0);
+              const nextEnd = Math.max(
+                currentStart + 0.05,
+                Math.min(Number(value || 0), duration || Number(value || 0))
+              );
+              setDraftAudioMap((current) => ({
+                ...current,
+                [slotKey]: {
+                  trackIndex,
+                  startSec: currentStart.toFixed(2),
+                  endSec: nextEnd.toFixed(2),
+                  hasSegment: true,
+                },
+              }));
+            }}
+            className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
+            placeholder="end"
+          />
+          <button
+            type="button"
+            disabled={!canPreview}
+            onClick={() => handlePreviewSegment(pageIndex, slot)}
+            className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+          >
+            {audioPreviewState.slotKey === slotKey && audioPreviewState.isPlaying ? "停止试听" : "试听片段"}
+          </button>
+        </div>
+        <div className="mt-3 rounded-lg border border-indigo-100 bg-white px-3 py-3">
+          <div className="relative h-2 overflow-hidden rounded-full bg-slate-100">
+            {duration > 0 ? (
+              <div
+                className="absolute top-0 h-full rounded-full bg-indigo-300"
+                style={{ left: `${segmentOffsetPercent}%`, width: `${segmentWidthPercent}%` }}
+              />
+            ) : null}
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(0.1, timelineMax)}
+            step={0.01}
+            value={Math.max(0, Math.min(progressValue, Math.max(0.1, timelineMax)))}
+            onChange={(event) => handleSeekPreview(pageIndex, slot, Number(event.target.value))}
+            className={`mt-2 w-full ${options.sliderClass}`}
+          />
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <div>
+              <p className="text-[11px] font-semibold text-slate-500">Start (drag)</p>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0.1, timelineMax)}
+                step={0.01}
+                value={Math.max(0, Math.min(start, Math.max(0.1, timelineMax)))}
+                onChange={(event) => {
+                  const nextStart = Number(event.target.value);
+                  setDraftAudioMap((current) => {
+                    const currentEnd = Number(current[slotKey]?.endSec ?? end);
+                    const safeEnd = Math.max(nextStart + 0.05, currentEnd);
+                    return {
+                      ...current,
+                      [slotKey]: {
+                        trackIndex,
+                        startSec: nextStart.toFixed(2),
+                        endSec: safeEnd.toFixed(2),
+                        hasSegment: true,
+                      },
+                    };
+                  });
+                }}
+                className={`mt-1 w-full ${options.sliderClass}`}
+              />
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold text-slate-500">End (drag)</p>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0.1, timelineMax)}
+                step={0.01}
+                value={Math.max(0, Math.min(end, Math.max(0.1, timelineMax)))}
+                onChange={(event) => {
+                  const nextEndRaw = Number(event.target.value);
+                  setDraftAudioMap((current) => {
+                    const currentStart = Number(current[slotKey]?.startSec ?? start);
+                    const safeEnd = Math.max(currentStart + 0.05, nextEndRaw);
+                    return {
+                      ...current,
+                      [slotKey]: {
+                        trackIndex,
+                        startSec: currentStart.toFixed(2),
+                        endSec: safeEnd.toFixed(2),
+                        hasSegment: true,
+                      },
+                    };
+                  });
+                }}
+                className={`mt-1 w-full ${options.sliderClass}`}
+              />
+            </div>
+          </div>
+          <p className="mt-2 text-[11px] text-slate-500">
+            {start.toFixed(2)}s - {end.toFixed(2)}s / {duration.toFixed(2)}s
+          </p>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMatchDiagnostics = (pageIndex: number, slot: AudioSegmentSlot) => {
+    const diagnostic = diagnosticBySlot.get(getAudioSlotKey(pageIndex, slot));
+    if (!diagnostic) return null;
+    const diagnosticTrack =
+      typeof diagnostic.matchedTrackIndex === "number"
+        ? diagnosticTrackByIndex.get(diagnostic.matchedTrackIndex) || null
+        : null;
+
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">
+            Match Diagnostics
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-700">
+              匹配分数 {diagnostic.score !== null ? diagnostic.score.toFixed(2) : "--"}
+            </span>
+            <span
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                diagnostic.accepted
+                  ? "bg-emerald-100 text-emerald-700"
+                  : "bg-rose-100 text-rose-700"
+              }`}
+            >
+              {diagnostic.accepted ? "已用于映射" : "仅诊断，未覆盖音频"}
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <div className="rounded-lg border border-white bg-white/80 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+              页面文本
+            </p>
+            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-800">
+              {diagnostic.pageText || "未填写"}
+            </p>
+          </div>
+          <div className="rounded-lg border border-white bg-white/80 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+              匹配音频
+            </p>
+            <p className="mt-1 text-sm font-semibold text-slate-800">
+              {diagnostic.matchedTrackFileName || "未匹配"}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              {diagnostic.startSec !== null && diagnostic.endSec !== null
+                ? `${diagnostic.startSec.toFixed(2)}s - ${diagnostic.endSec.toFixed(2)}s`
+                : "暂无时间轴"}
+            </p>
+            {diagnosticTrack?.transcriptText ? (
+              <p className="mt-2 line-clamp-4 text-xs leading-5 text-slate-500">
+                {diagnosticTrack.transcriptText}
+              </p>
+            ) : null}
+          </div>
+        </div>
+
+        {diagnostic.matchedText ? (
+          <div className="mt-3 rounded-lg border border-amber-100 bg-white/80 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+              命中的转写片段
+            </p>
+            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-800">
+              {diagnostic.matchedText}
+            </p>
+          </div>
+        ) : null}
+      </div>
+    );
   };
 
   return (
@@ -3798,11 +5301,46 @@ const PageEditorPanel = ({
         </button>
       </div>
 
-      <div className="grid min-h-0 flex-1 gap-4 overflow-hidden p-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+      <div
+        className={`grid min-h-0 flex-1 gap-4 overflow-hidden p-4 ${
+          isViewManagerCollapsed
+            ? "grid-cols-1"
+            : "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]"
+        }`}
+      >
         <section className="min-h-0 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h4 className="text-sm font-black text-slate-900">页面顺序 + 文字 + 图片</h4>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsViewManagerCollapsed((current) => !current)}
+                className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                {isViewManagerCollapsed ? "展开右侧管理" : "收起右侧管理"}
+              </button>
+              <button
+                type="button"
+                onClick={onBatchFillImages}
+                className="rounded-full bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-600"
+              >
+                批量填充图片
+              </button>
+              <button
+                type="button"
+                onClick={onBatchFillTexts}
+                className="rounded-full bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-700"
+              >
+                粘贴导入文本
+              </button>
+              <button
+                type="button"
+                disabled={!hasAnyDraftText}
+                onClick={() => onGenerateSpeakingHints(draftTexts)}
+                className="rounded-full bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                生成提示
+              </button>
               <button
                 type="button"
                 onClick={handleSaveAllTexts}
@@ -3889,7 +5427,13 @@ const PageEditorPanel = ({
             {Array.from({ length: pageCount }, (_, pageIndex) => (
               <div
                 key={`${document.id}-editor-page-${pageIndex}`}
-                className="rounded-2xl border border-slate-200 bg-white p-3"
+                className={`rounded-2xl border bg-white p-3 ${
+                  spreadPositionByPage.get(pageIndex) === "left"
+                    ? "border-sky-200 bg-sky-50/20"
+                    : spreadPositionByPage.get(pageIndex) === "right"
+                      ? "border-violet-200 bg-violet-50/20"
+                      : "border-slate-200"
+                }`}
               >
                 <div className="flex flex-wrap items-start gap-3">
                   <div className="h-20 w-16 overflow-hidden rounded-xl border border-slate-100 bg-slate-100">
@@ -3903,7 +5447,22 @@ const PageEditorPanel = ({
                   </div>
 
                   <div className="flex-1 space-y-2">
+                    {(() => {
+                      const isPairMode = Boolean(pairEditorModeByPage[pageIndex]);
+                      const { leftText, rightText } = splitDualPageText(draftTexts[pageIndex] || "");
+                      return (
+                        <>
                     <div className="flex flex-wrap items-center gap-2">
+                      {spreadPositionByPage.get(pageIndex) === "left" ? (
+                        <span className="rounded-full bg-sky-600 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-white">
+                          Left Page
+                        </span>
+                      ) : null}
+                      {spreadPositionByPage.get(pageIndex) === "right" ? (
+                        <span className="rounded-full bg-violet-600 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-white">
+                          Right Page
+                        </span>
+                      ) : null}
                       <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">
                         第 {pageIndex + 1} 页
                       </span>
@@ -3945,379 +5504,216 @@ const PageEditorPanel = ({
                       >
                         删除页面
                       </button>
+                      <div className="ml-auto inline-flex rounded-full bg-slate-100 p-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const mergedText = mergeDualPageTextToSingle(leftText, rightText);
+                            setDraftTexts((current) => {
+                              const next = [...current];
+                              next[pageIndex] = mergedText;
+                              return next;
+                            });
+                            setPairEditorModeByPage((current) => ({
+                              ...current,
+                              [pageIndex]: false,
+                            }));
+                            onSetPairEditorMode(pageIndex, false, mergedText);
+                          }}
+                          className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+                            !isPairMode
+                              ? "bg-white text-slate-900 shadow-sm"
+                              : "text-slate-500 hover:text-slate-700"
+                          }`}
+                        >
+                          单文本
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPairEditorModeByPage((current) => ({
+                              ...current,
+                              [pageIndex]: true,
+                            }));
+                            onSetPairEditorMode(pageIndex, true);
+                          }}
+                          className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+                            isPairMode
+                              ? "bg-white text-slate-900 shadow-sm"
+                              : "text-slate-500 hover:text-slate-700"
+                          }`}
+                        >
+                          左右双文本
+                        </button>
+                      </div>
                     </div>
 
-                    <textarea
-                      value={draftTexts[pageIndex] || ""}
-                      onChange={(event) => {
-                        const next = [...draftTexts];
-                        next[pageIndex] = event.target.value;
-                        setDraftTexts(next);
-                      }}
-                      rows={3}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition focus:border-sky-400"
-                      placeholder="编辑这一页识别文字"
-                    />
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => onSavePageText(pageIndex, draftTexts[pageIndex] || "")}
-                        className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700"
-                      >
-                        保存文字
-                      </button>
-                    </div>
+                    {isPairMode ? (
+                      <div className="grid gap-3 lg:grid-cols-2">
+                        <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-sky-700">
+                              Left Page
+                            </p>
+                            <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-700">
+                              第 {pageIndex + 1} 页
+                            </span>
+                          </div>
+                          <textarea
+                            value={leftText}
+                            onChange={(event) => {
+                              const next = [...draftTexts];
+                              next[pageIndex] = joinDualPageText(event.target.value, rightText);
+                              setDraftTexts(next);
+                            }}
+                            rows={4}
+                            className="mt-2 w-full rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-sky-400"
+                            placeholder="输入左页文字"
+                          />
+                          <div className="mt-2 flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => shiftDraftTextsForwardFrom(pageIndex, "left")}
+                              className="rounded-full bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-700 transition hover:bg-amber-200"
+                            >
+                              后移后文
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onSavePageText(pageIndex, draftTexts[pageIndex] || "")}
+                              className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700"
+                            >
+                              保存左页
+                            </button>
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-700">
+                              Right Page
+                            </p>
+                            <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-violet-700">
+                              当前页右侧
+                            </span>
+                          </div>
+                          <textarea
+                            value={rightText}
+                            onChange={(event) => {
+                              const next = [...draftTexts];
+                              next[pageIndex] = joinDualPageText(leftText, event.target.value);
+                              setDraftTexts(next);
+                            }}
+                            rows={4}
+                            className="mt-2 w-full rounded-xl border border-violet-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-violet-400"
+                            placeholder="输入右页文字"
+                          />
+                          <div className="mt-2 flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => shiftDraftTextsForwardFrom(pageIndex, "right")}
+                              className="rounded-full bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-700 transition hover:bg-amber-200"
+                            >
+                              后移后文
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onSavePageText(pageIndex, draftTexts[pageIndex] || "")}
+                              className="rounded-full bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-700"
+                            >
+                              保存当前页
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <textarea
+                          value={draftTexts[pageIndex] || ""}
+                          onChange={(event) => {
+                            const next = [...draftTexts];
+                            next[pageIndex] = event.target.value;
+                            setDraftTexts(next);
+                          }}
+                          rows={3}
+                          className={`w-full rounded-xl bg-white px-3 py-2 text-sm text-slate-800 outline-none transition ${
+                            spreadPositionByPage.get(pageIndex) === "left"
+                              ? "border border-sky-200 focus:border-sky-500"
+                              : spreadPositionByPage.get(pageIndex) === "right"
+                                ? "border border-violet-200 focus:border-violet-500"
+                                : "border border-slate-200 focus:border-sky-400"
+                          }`}
+                          placeholder={
+                            spreadPositionByPage.get(pageIndex) === "left"
+                              ? "输入左页文字"
+                              : spreadPositionByPage.get(pageIndex) === "right"
+                                ? "输入右页文字"
+                                : "编辑这一页识别文字"
+                          }
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => shiftDraftTextsForwardFrom(pageIndex, "single")}
+                            className="rounded-full bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-700 transition hover:bg-amber-200"
+                          >
+                            后移后文
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onSavePageText(pageIndex, draftTexts[pageIndex] || "")}
+                            className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700"
+                          >
+                            保存文字
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </>
+                );
+              })()}
 
                     {audioTracks.length ? (
-                      <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-3">
+                      <div className="space-y-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-3">
                         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-indigo-600">
                           Audio Mapping
                         </p>
-                        <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px_110px_auto] sm:items-center">
-                          <select
-                            value={draftAudioMap[pageIndex]?.trackIndex ?? 0}
-                            onChange={(event) => {
-                              const trackIndex = Number(event.target.value);
-                              const duration = audioTracks[trackIndex]?.durationSec || 0;
-                              setDraftAudioMap((current) => ({
-                                ...current,
-                                [pageIndex]: {
-                                  trackIndex,
-                                  startSec: current[pageIndex]?.startSec ?? "0.00",
-                                  endSec: current[pageIndex]?.endSec ?? duration.toFixed(2),
-                                  hasSegment: current[pageIndex]?.hasSegment ?? false,
-                                },
-                              }));
-                            }}
-                            className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
-                          >
-                            {audioTracks.map((track, trackIndex) => (
-                              <option key={`${track.fileName}-${trackIndex}`} value={trackIndex}>
-                                {track.fileName}
-                              </option>
-                            ))}
-                          </select>
-                          <input
-                            type="number"
-                            min={0}
-                            step={0.1}
-                            value={draftAudioMap[pageIndex]?.startSec ?? "0.00"}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              const currentTrack = draftAudioMap[pageIndex]?.trackIndex ?? 0;
-                              const duration = audioTracks[currentTrack]?.durationSec || 0;
-                              const nextStart = Math.max(0, Math.min(Number(value || 0), duration));
-                              const currentEnd = Number(draftAudioMap[pageIndex]?.endSec ?? duration);
-                              const nextEnd = Math.max(nextStart + 0.05, currentEnd);
-                              setDraftAudioMap((current) => ({
-                                ...current,
-                                [pageIndex]: {
-                                  trackIndex: currentTrack,
-                                  startSec: nextStart.toFixed(2),
-                                  endSec: nextEnd.toFixed(2),
-                                  hasSegment: true,
-                                },
-                              }));
-                            }}
-                            className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
-                            placeholder="start"
-                          />
-                          <input
-                            type="number"
-                            min={0}
-                            step={0.1}
-                            value={draftAudioMap[pageIndex]?.endSec ?? "0.00"}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              const currentTrack = draftAudioMap[pageIndex]?.trackIndex ?? 0;
-                              const duration = audioTracks[currentTrack]?.durationSec || 0;
-                              const currentStart = Number(draftAudioMap[pageIndex]?.startSec ?? 0);
-                              const nextEnd = Math.max(
-                                currentStart + 0.05,
-                                Math.min(Number(value || 0), duration || Number(value || 0))
-                              );
-                              setDraftAudioMap((current) => ({
-                                ...current,
-                                [pageIndex]: {
-                                  trackIndex: currentTrack,
-                                  startSec: currentStart.toFixed(2),
-                                  endSec: nextEnd.toFixed(2),
-                                  hasSegment: true,
-                                },
-                              }));
-                            }}
-                            className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
-                            placeholder="end"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onSaveAudioMapping(
-                                pageIndex,
-                                draftAudioMap[pageIndex]?.trackIndex ?? 0,
-                                Number(draftAudioMap[pageIndex]?.startSec ?? 0),
-                                Number(draftAudioMap[pageIndex]?.endSec ?? 0)
-                              )
-                            }
-                            className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700"
-                          >
-                            保存音频
-                          </button>
-                        </div>
-                        {(() => {
-                          const draft = draftAudioMap[pageIndex];
-                          const trackIndex = draft?.trackIndex ?? 0;
-                          const duration = Math.max(0, audioTracks[trackIndex]?.durationSec || 0);
-                          const start = Math.max(
-                            0,
-                            Math.min(Number(draft?.startSec ?? 0), duration || Number(draft?.startSec ?? 0))
-                          );
-                          const end = Math.max(
-                            start + 0.05,
-                            Math.min(Number(draft?.endSec ?? duration), duration || Number(draft?.endSec ?? duration))
-                          );
-                          const progressValue =
-                            audioPreviewState.pageIndex === pageIndex
-                              ? audioPreviewState.currentSec
-                              : start;
-                          const canPreview =
-                            Boolean(draft?.hasSegment) &&
-                            Boolean(getDocumentAudioTrackUrl(document, trackIndex));
-                          const timelineMax =
-                            duration > 0
-                              ? duration
-                              : Math.max(
-                                  end + DEFAULT_AUDIO_SEGMENT_SEC,
-                                  start + DEFAULT_AUDIO_SEGMENT_SEC,
-                                  10
-                                );
-                          const segmentWidthPercent =
-                            duration > 0
-                              ? Math.max(1, ((end - start) / duration) * 100)
-                              : 0;
-                          const segmentOffsetPercent =
-                            duration > 0 ? (start / duration) * 100 : 0;
-                          return (
-                            <div className="mt-3 rounded-lg border border-indigo-100 bg-white px-3 py-3">
-                              <div className="relative h-2 overflow-hidden rounded-full bg-slate-100">
-                                {duration > 0 ? (
-                                  <div
-                                    className="absolute top-0 h-full rounded-full bg-indigo-300"
-                                    style={{
-                                      left: `${segmentOffsetPercent}%`,
-                                      width: `${segmentWidthPercent}%`,
-                                    }}
-                                  />
-                                ) : null}
-                              </div>
-                              <input
-                                type="range"
-                                min={0}
-                                max={Math.max(0.1, timelineMax)}
-                                step={0.01}
-                                value={Math.max(0, Math.min(progressValue, Math.max(0.1, timelineMax)))}
-                                onChange={(event) => {
-                                  const target = Number(event.target.value);
-                                  handleSeekPreview(pageIndex, target);
-                                }}
-                                className="mt-2 w-full accent-indigo-500"
-                              />
-                              <div className="mt-2 grid grid-cols-2 gap-2">
-                                <div>
-                                  <p className="text-[11px] font-semibold text-slate-500">Start (drag)</p>
-                                  <input
-                                    type="range"
-                                    min={0}
-                                    max={Math.max(0.1, timelineMax)}
-                                    step={0.01}
-                                    value={Math.max(0, Math.min(start, Math.max(0.1, timelineMax)))}
-                                    onChange={(event) => {
-                                      const nextStart = Number(event.target.value);
-                                      setDraftAudioMap((current) => {
-                                        const currentEnd = Number(current[pageIndex]?.endSec ?? end);
-                                        const safeEnd = Math.max(nextStart + 0.05, currentEnd);
-                                        return {
-                                          ...current,
-                                          [pageIndex]: {
-                                            trackIndex,
-                                            startSec: nextStart.toFixed(2),
-                                            endSec: safeEnd.toFixed(2),
-                                            hasSegment: true,
-                                          },
-                                        };
-                                      });
-                                    }}
-                                    className="mt-1 w-full accent-indigo-500"
-                                  />
-                                </div>
-                                <div>
-                                  <p className="text-[11px] font-semibold text-slate-500">End (drag)</p>
-                                  <input
-                                    type="range"
-                                    min={0}
-                                    max={Math.max(0.1, timelineMax)}
-                                    step={0.01}
-                                    value={Math.max(0, Math.min(end, Math.max(0.1, timelineMax)))}
-                                    onChange={(event) => {
-                                      const nextEndRaw = Number(event.target.value);
-                                      setDraftAudioMap((current) => {
-                                        const currentStart = Number(current[pageIndex]?.startSec ?? start);
-                                        const safeEnd = Math.max(currentStart + 0.05, nextEndRaw);
-                                        return {
-                                          ...current,
-                                          [pageIndex]: {
-                                            trackIndex,
-                                            startSec: currentStart.toFixed(2),
-                                            endSec: safeEnd.toFixed(2),
-                                            hasSegment: true,
-                                          },
-                                        };
-                                      });
-                                    }}
-                                    className="mt-1 w-full accent-indigo-500"
-                                  />
-                                </div>
-                              </div>
-                              <div className="mt-2 flex items-center justify-between">
-                                <p className="text-[11px] text-slate-500">
-                                  {start.toFixed(2)}s - {end.toFixed(2)}s / {duration.toFixed(2)}s
-                                </p>
-                                <button
-                                  type="button"
-                                  disabled={!canPreview}
-                                  onClick={() => handlePreviewSegment(pageIndex)}
-                                  className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-                                >
-                                  {audioPreviewState.pageIndex === pageIndex && audioPreviewState.isPlaying
-                                    ? "停止试听"
-                                    : "试听片段"}
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })()}
+                        {pairEditorModeByPage[pageIndex] ? (
+                          <div className="grid gap-3 xl:grid-cols-2">
+                            {renderAudioMappingEditor(pageIndex, "left", {
+                              title: "Left Page Audio",
+                              toneClass: "text-sky-600",
+                              borderClass: "border-sky-200 bg-sky-50/40",
+                              sliderClass: "accent-sky-500",
+                              saveLabel: "保存左页音频",
+                            })}
+                            {renderAudioMappingEditor(pageIndex, "right", {
+                              title: "Right Page Audio",
+                              toneClass: "text-violet-600",
+                              borderClass: "border-violet-200 bg-violet-50/40",
+                              sliderClass: "accent-violet-500",
+                              saveLabel: "保存右页音频",
+                            })}
+                          </div>
+                        ) : (
+                          renderAudioMappingEditor(pageIndex, "single", {
+                            title: "Page Audio",
+                            toneClass: "text-indigo-600",
+                            borderClass: "border-indigo-200 bg-white/70",
+                            sliderClass: "accent-indigo-500",
+                            saveLabel: "保存音频",
+                          })
+                        )}
                       </div>
                     ) : null}
 
-                    {(() => {
-                      const diagnostic = diagnosticByPage.get(pageIndex);
-                      if (!diagnostic) return null;
-                      const diagnosticTrack =
-                        typeof diagnostic.matchedTrackIndex === "number"
-                          ? diagnosticTrackByIndex.get(diagnostic.matchedTrackIndex) || null
-                          : null;
-
-                      return (
-                        <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">
-                              Match Diagnostics
-                            </p>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-700">
-                                匹配分数 {diagnostic.score !== null ? diagnostic.score.toFixed(2) : "--"}
-                              </span>
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                                  diagnostic.accepted
-                                    ? "bg-emerald-100 text-emerald-700"
-                                    : "bg-rose-100 text-rose-700"
-                                }`}
-                              >
-                                {diagnostic.accepted ? "已用于映射" : "仅诊断，未覆盖音频"}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                            <div className="rounded-lg border border-white bg-white/80 p-3">
-                              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                                当前页文字
-                              </p>
-                              <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-800">
-                                {draftTexts[pageIndex] || "(空)"}
-                              </p>
-                            </div>
-                            <div className="rounded-lg border border-white bg-white/80 p-3">
-                              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                                最终命中结果
-                              </p>
-                              <div className="mt-2 space-y-1 text-sm leading-6 text-slate-700">
-                                <p>
-                                  音频：
-                                  <span className="font-semibold text-slate-900">
-                                    {diagnostic.matchedTrackFileName || "未命中"}
-                                  </span>
-                                </p>
-                                <p>
-                                  时间：
-                                  <span className="font-semibold text-slate-900">
-                                    {formatAudioSeconds(diagnostic.startSec)} - {formatAudioSeconds(diagnostic.endSec)}
-                                  </span>
-                                </p>
-                                <p className="pt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                                  命中的转写文本
-                                </p>
-                                <p className="whitespace-pre-line text-sm leading-6 text-slate-800">
-                                  {diagnostic.matchedText || "(未命中任何片段)"}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-
-                          {diagnosticTrack ? (
-                            <details className="mt-3 rounded-lg border border-white bg-white/80 p-3">
-                              <summary className="cursor-pointer text-sm font-semibold text-slate-800">
-                                查看这条音频的后端转写片段
-                              </summary>
-                              <div className="mt-3 space-y-2">
-                                <p className="text-xs text-slate-500">
-                                  {diagnosticTrack.fileName} / 共 {diagnosticTrack.segments.length} 段 / 时长 {formatAudioSeconds(diagnosticTrack.durationSec)}
-                                </p>
-                                {diagnosticTrack.transcriptText ? (
-                                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700">
-                                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                                      整条转写文本
-                                    </p>
-                                    <p className="mt-1 whitespace-pre-line">
-                                      {diagnosticTrack.transcriptText}
-                                    </p>
-                                  </div>
-                                ) : null}
-                                <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-                                  {diagnosticTrack.segments.length ? (
-                                    diagnosticTrack.segments.map((segment, segmentIndex) => {
-                                      const isMatched =
-                                        diagnostic.startSec !== null &&
-                                        diagnostic.endSec !== null &&
-                                        segment.endSec >= diagnostic.startSec - 0.02 &&
-                                        segment.startSec <= diagnostic.endSec + 0.02;
-                                      return (
-                                        <div
-                                          key={`${pageIndex}-${segmentIndex}-${segment.startSec}`}
-                                          className={`rounded-lg border px-3 py-2 text-sm ${
-                                            isMatched
-                                              ? "border-amber-300 bg-amber-100/80"
-                                              : "border-slate-200 bg-slate-50"
-                                          }`}
-                                        >
-                                          <p className="text-[11px] font-semibold text-slate-500">
-                                            {formatAudioSeconds(segment.startSec)} - {formatAudioSeconds(segment.endSec)}
-                                          </p>
-                                          <p className="mt-1 leading-6 text-slate-800">{segment.text}</p>
-                                        </div>
-                                      );
-                                    })
-                                  ) : (
-                                    <p className="text-sm text-slate-500">后端没有返回可用转写片段。</p>
-                                  )}
-                                </div>
-                              </div>
-                            </details>
-                          ) : null}
-                        </div>
-                      );
-                    })()}
+                    {pairEditorModeByPage[pageIndex] ? (
+                      <>
+                        {renderMatchDiagnostics(pageIndex, "left")}
+                        {renderMatchDiagnostics(pageIndex, "right")}
+                      </>
+                    ) : (
+                      renderMatchDiagnostics(pageIndex, "single")
+                    )}
                   </div>
                 </div>
               </div>
@@ -4325,12 +5721,22 @@ const PageEditorPanel = ({
           </div>
         </section>
 
+        {!isViewManagerCollapsed ? (
         <section className="min-h-0 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h4 className="text-sm font-black text-slate-900">对页组合管理</h4>
-            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">
-              {views.length} 组
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">
+                {views.length} 组
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsViewManagerCollapsed(true)}
+                className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                收起
+              </button>
+            </div>
           </div>
 
           <div className="space-y-3">
@@ -4338,6 +5744,14 @@ const PageEditorPanel = ({
               views.map((view, viewIndex) => {
                 const canMerge =
                   view.kind === "single" && views[viewIndex + 1]?.kind === "single";
+                const leftPageIndex =
+                  view.kind === "spread" && typeof view.pages[0] === "number"
+                    ? view.pages[0]
+                    : null;
+                const rightPageIndex =
+                  view.kind === "spread" && typeof view.pages[1] === "number"
+                    ? view.pages[1]
+                    : null;
 
                 return (
                   <div
@@ -4381,6 +5795,76 @@ const PageEditorPanel = ({
                         </button>
                       ) : null}
                     </div>
+
+                    {view.kind === "spread" && (leftPageIndex !== null || rightPageIndex !== null) ? (
+                      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                        {leftPageIndex !== null ? (
+                          <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-sky-700">
+                                Left Page
+                              </p>
+                              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-700">
+                                第 {leftPageIndex + 1} 页
+                              </span>
+                            </div>
+                            <textarea
+                              value={draftTexts[leftPageIndex] || ""}
+                              onChange={(event) => {
+                                const next = [...draftTexts];
+                                next[leftPageIndex] = event.target.value;
+                                setDraftTexts(next);
+                              }}
+                              rows={4}
+                              className="mt-2 w-full rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-sky-400"
+                              placeholder="输入左页文字"
+                            />
+                            <div className="mt-2 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => onSavePageText(leftPageIndex, draftTexts[leftPageIndex] || "")}
+                                className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700"
+                              >
+                                保存左页
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {rightPageIndex !== null ? (
+                          <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-700">
+                                Right Page
+                              </p>
+                              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-violet-700">
+                                第 {rightPageIndex + 1} 页
+                              </span>
+                            </div>
+                            <textarea
+                              value={draftTexts[rightPageIndex] || ""}
+                              onChange={(event) => {
+                                const next = [...draftTexts];
+                                next[rightPageIndex] = event.target.value;
+                                setDraftTexts(next);
+                              }}
+                              rows={4}
+                              className="mt-2 w-full rounded-xl border border-violet-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-violet-400"
+                              placeholder="输入右页文字"
+                            />
+                            <div className="mt-2 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => onSavePageText(rightPageIndex, draftTexts[rightPageIndex] || "")}
+                                className="rounded-full bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-700"
+                              >
+                                保存右页
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 );
               })
@@ -4391,6 +5875,7 @@ const PageEditorPanel = ({
             )}
           </div>
         </section>
+        ) : null}
       </div>
     </div>
   );
@@ -4399,6 +5884,8 @@ const PageEditorPanel = ({
 const SidePanel = ({
   sourceName,
   setSourceName,
+  manualPageCount,
+  setManualPageCount,
   fileInputRef,
   audioInputRef,
   pendingImages,
@@ -4413,10 +5900,13 @@ const SidePanel = ({
   onChooseAudioFiles,
   onAttachPendingAudio,
   onAnalyze,
+  onCreateManualDocument,
   onSelectDocument,
 }: {
   sourceName: string;
   setSourceName: (value: string) => void;
+  manualPageCount: number;
+  setManualPageCount: (value: number) => void;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   audioInputRef: React.RefObject<HTMLInputElement | null>;
   pendingImages: string[];
@@ -4431,6 +5921,7 @@ const SidePanel = ({
   onChooseAudioFiles: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onAttachPendingAudio: () => void;
   onAnalyze: () => void;
+  onCreateManualDocument: () => void;
   onSelectDocument: (id: string) => void;
 }) => (
   <div className="space-y-5">
@@ -4478,6 +5969,40 @@ const SidePanel = ({
           className="hidden"
           onChange={onChooseFiles}
         />
+
+        <div className="rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-800">手动创建任务</p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                不分析 PDF，直接建立空白任务，后续逐页上传图片并编辑文本。
+              </p>
+            </div>
+            <div className="w-20 shrink-0">
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                页数
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={manualPageCount}
+                onChange={(event) => {
+                  const nextValue = Number.parseInt(event.target.value || "0", 10);
+                  setManualPageCount(Number.isFinite(nextValue) ? nextValue : 1);
+                }}
+                className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition focus:border-amber-400"
+              />
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCreateManualDocument}
+            className="mt-3 w-full rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-600"
+          >
+            创建空白任务并开始编辑
+          </button>
+        </div>
 
         <button
           type="button"
@@ -4638,6 +6163,296 @@ const InfoPill = ({ label, value }: { label: string; value: string }) => (
     <p className="mt-2 text-sm font-semibold text-slate-700">{value}</p>
   </div>
 );
+
+const MetadataEditorPanel = ({
+  document,
+  onSave,
+  onClose,
+}: {
+  document: StoryflowDocument;
+  onSave: (payload: {
+    title: string;
+    summary: string;
+    characters: string[];
+    time: string;
+    place: string;
+    keywords: string[];
+    mindMapBeginning: string[];
+    mindMapMiddle: string[];
+    mindMapEnd: string[];
+    originalText: string;
+  }) => void;
+  onClose: () => void;
+}) => {
+  const importTextInputRef = useRef<HTMLInputElement | null>(null);
+  const [title, setTitle] = useState(document.analysis.title || document.sourceName || "");
+  const [summary, setSummary] = useState(document.analysis.summary || "");
+  const [characters, setCharacters] = useState(document.analysis.characters.join("\n"));
+  const [time, setTime] = useState(document.analysis.setting.time || "");
+  const [place, setPlace] = useState(document.analysis.setting.place || "");
+  const [keywords, setKeywords] = useState(document.analysis.keywords.join("\n"));
+  const [mindMapBeginning, setMindMapBeginning] = useState(document.analysis.mindMap.beginning.join("\n"));
+  const [mindMapMiddle, setMindMapMiddle] = useState(document.analysis.mindMap.middle.join("\n"));
+  const [mindMapEnd, setMindMapEnd] = useState(document.analysis.mindMap.end.join("\n"));
+  const [originalText, setOriginalText] = useState("");
+  const [importStatus, setImportStatus] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTitle(document.analysis.title || document.sourceName || "");
+    setSummary(document.analysis.summary || "");
+    setCharacters(document.analysis.characters.join("\n"));
+    setTime(document.analysis.setting.time || "");
+    setPlace(document.analysis.setting.place || "");
+    setKeywords(document.analysis.keywords.join("\n"));
+    setMindMapBeginning(document.analysis.mindMap.beginning.join("\n"));
+    setMindMapMiddle(document.analysis.mindMap.middle.join("\n"));
+    setMindMapEnd(document.analysis.mindMap.end.join("\n"));
+    setOriginalText("");
+    setImportStatus(null);
+    setImportError(null);
+  }, [document]);
+
+  const handleImportStructuredText = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    try {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      setImportError(null);
+      setImportStatus("正在读取文本...");
+      const candidates = await decodeImportedTextCandidates(file);
+      const ranked = candidates
+        .map((content) => {
+          const parsed = parseStructuredMetadataImport(content);
+          const matchedCount = Object.values(parsed).filter((item) => item.trim().length > 0).length;
+          return { parsed, matchedCount };
+        })
+        .sort((left, right) => right.matchedCount - left.matchedCount);
+      const { parsed, matchedCount } = ranked[0] || {
+        parsed: parseStructuredMetadataImport(""),
+        matchedCount: 0,
+      };
+
+      if (!matchedCount) {
+        setImportStatus(null);
+        setImportError("没有识别到可导入的标题段落，请检查标题是否为“标题/摘要/角色/时间/地点/关键词/开头/中间/结尾”等格式。");
+        return;
+      }
+
+      if (parsed.title) setTitle(parsed.title);
+      if (parsed.summary) setSummary(parsed.summary);
+      if (parsed.characters) setCharacters(parsed.characters);
+      if (parsed.time) setTime(parsed.time);
+      if (parsed.place) setPlace(parsed.place);
+      if (parsed.keywords) setKeywords(parsed.keywords);
+      if (parsed.mindMapBeginning) setMindMapBeginning(parsed.mindMapBeginning);
+      if (parsed.mindMapMiddle) setMindMapMiddle(parsed.mindMapMiddle);
+      if (parsed.mindMapEnd) setMindMapEnd(parsed.mindMapEnd);
+      if (parsed.originalText) setOriginalText(parsed.originalText);
+      setImportStatus(`已识别并填入 ${matchedCount} 个内容区块，请点击“保存资料信息”生效。`);
+    } finally {
+      if (event.target) {
+        event.target.value = "";
+      }
+    }
+  };
+
+  return (
+    <div className="flex flex-col">
+      <input
+        ref={importTextInputRef}
+        type="file"
+        accept=".txt,.md,text/plain"
+        className="hidden"
+        onChange={(event) => {
+          void handleImportStructuredText(event);
+        }}
+      />
+      <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
+            Story Metadata
+          </p>
+          <h3 className="mt-1 text-xl font-black text-slate-900">编辑资料信息</h3>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => importTextInputRef.current?.click()}
+            className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-700"
+          >
+            批量导入文本
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 p-5 md:grid-cols-2">
+        {importError ? (
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600 md:col-span-2">
+            {importError}
+          </div>
+        ) : null}
+        {importStatus ? (
+          <div className="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-700 md:col-span-2">
+            {importStatus}
+          </div>
+        ) : null}
+
+        <label className="space-y-2 md:col-span-2">
+          <span className="text-sm font-semibold text-slate-700">标题</span>
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+
+        <label className="space-y-2 md:col-span-2">
+          <span className="text-sm font-semibold text-slate-700">摘要</span>
+          <textarea
+            value={summary}
+            onChange={(event) => setSummary(event.target.value)}
+            rows={4}
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+
+        <label className="space-y-2">
+          <span className="text-sm font-semibold text-slate-700">角色</span>
+          <textarea
+            value={characters}
+            onChange={(event) => setCharacters(event.target.value)}
+            rows={5}
+            placeholder="每行一个角色，或用 / 、 , 分隔"
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+
+        <label className="space-y-2">
+          <span className="text-sm font-semibold text-slate-700">关键词</span>
+          <textarea
+            value={keywords}
+            onChange={(event) => setKeywords(event.target.value)}
+            rows={5}
+            placeholder="每行一个关键词，或用 / 、 , 分隔"
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+
+        <label className="space-y-2">
+          <span className="text-sm font-semibold text-slate-700">时间</span>
+          <input
+            value={time}
+            onChange={(event) => setTime(event.target.value)}
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+
+        <label className="space-y-2">
+          <span className="text-sm font-semibold text-slate-700">地点</span>
+          <input
+            value={place}
+            onChange={(event) => setPlace(event.target.value)}
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+
+        <div className="space-y-3 rounded-[1.6rem] border border-slate-200 bg-slate-50/70 p-4 md:col-span-2">
+          <div>
+            <p className="text-sm font-black text-slate-900">编辑思维导图</p>
+            <p className="mt-1 text-xs leading-6 text-slate-500">
+              支持手动填写，或通过“批量导入文本”按段落标题自动填入。
+            </p>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <label className="space-y-2">
+              <span className="text-sm font-semibold text-slate-700">开头 / Beginning</span>
+              <textarea
+                value={mindMapBeginning}
+                onChange={(event) => setMindMapBeginning(event.target.value)}
+                rows={6}
+                placeholder="每行一条思维导图内容"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-semibold text-slate-700">中间 / Middle</span>
+              <textarea
+                value={mindMapMiddle}
+                onChange={(event) => setMindMapMiddle(event.target.value)}
+                rows={6}
+                placeholder="每行一条思维导图内容"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-semibold text-slate-700">结尾 / End</span>
+              <textarea
+                value={mindMapEnd}
+                onChange={(event) => setMindMapEnd(event.target.value)}
+                rows={6}
+                placeholder="每行一条思维导图内容"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400"
+              />
+            </label>
+          </div>
+        </div>
+
+        <label className="space-y-2 md:col-span-2">
+          <span className="text-sm font-semibold text-slate-700">原文 / Original Text</span>
+          <textarea
+            value={originalText}
+            onChange={(event) => setOriginalText(event.target.value)}
+            rows={8}
+            placeholder="导入后会在保存资料信息时，按顺序自动填入页面编辑器文字框。"
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
+          />
+        </label>
+      </div>
+
+      <div className="flex justify-end gap-3 border-t border-slate-200 px-5 py-4">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            onSave({
+              title: title.trim(),
+              summary: summary.trim(),
+              characters: parseMetadataLineList(characters),
+              time: time.trim(),
+              place: place.trim(),
+              keywords: parseMetadataLineList(keywords),
+              mindMapBeginning: parseMetadataLineList(mindMapBeginning),
+              mindMapMiddle: parseMetadataLineList(mindMapMiddle),
+              mindMapEnd: parseMetadataLineList(mindMapEnd),
+              originalText: originalText.trim(),
+            })
+          }
+          className="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700"
+        >
+          保存资料信息
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const TabButton = ({
   active,
@@ -5662,13 +7477,19 @@ const SpeakingDeck = ({
   const showOriginalText = hintStage >= 2;
   const isPracticeActive = practiceStatus === "active";
   const isCountingDown = practiceStatus === "countdown";
-  const clozePromptHint = buildClozePromptHint(
-    page.visibleText,
-    document.analysis.keywords || [],
-    document.analysis.fullText || "",
-    page.keyVocabulary
-  );
+  const clozePromptHint =
+    page.clozeHint ||
+    buildStoredClozeHint(
+      page.visibleText,
+      document.analysis.keywords || [],
+      document.analysis.fullText || "",
+      page.keyVocabulary
+    );
   const displayPromptText = showOriginalText ? page.visibleText : clozePromptHint;
+  const displayPromptParts = splitDualPageText(displayPromptText);
+  const hasDualDisplayPrompt = Boolean(
+    displayPromptParts.leftText.trim() && displayPromptParts.rightText.trim()
+  );
   const latestPracticeRecord = latestPracticeId
     ? practiceRecords.find((item) => item.id === latestPracticeId) || null
     : practiceRecords[0] || null;
@@ -5937,11 +7758,32 @@ const SpeakingDeck = ({
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
                         {showOriginalText ? "原文" : "原文填空"}
                       </p>
-                      <div className="mt-1 rounded-[1.2rem] bg-emerald-50 px-3 py-3 shadow-inner shadow-emerald-100/50 md:px-4 md:py-4">
-                        <p className="text-[1.125rem] font-semibold leading-[1.9] tracking-[0.03em] text-emerald-900 md:text-[1.85rem]">
-                          {displayPromptText || "暂无原文提示"}
-                        </p>
-                      </div>
+                      {hasDualDisplayPrompt ? (
+                        <div className="mt-1 grid gap-3 md:grid-cols-2">
+                          <div className="rounded-[1.2rem] border border-sky-100 bg-sky-50 px-3 py-3 shadow-inner shadow-sky-100/50 md:px-4 md:py-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">
+                              Left Page
+                            </p>
+                            <p className="mt-2 text-[1.05rem] font-semibold leading-[1.9] tracking-[0.03em] text-sky-950 md:text-[1.55rem]">
+                              {displayPromptParts.leftText || "暂无左页文字"}
+                            </p>
+                          </div>
+                          <div className="rounded-[1.2rem] border border-violet-100 bg-violet-50 px-3 py-3 shadow-inner shadow-violet-100/50 md:px-4 md:py-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-700">
+                              Right Page
+                            </p>
+                            <p className="mt-2 text-[1.05rem] font-semibold leading-[1.9] tracking-[0.03em] text-violet-950 md:text-[1.55rem]">
+                              {displayPromptParts.rightText || "暂无右页文字"}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-1 rounded-[1.2rem] bg-emerald-50 px-3 py-3 shadow-inner shadow-emerald-100/50 md:px-4 md:py-4">
+                          <p className="text-[1.125rem] font-semibold leading-[1.9] tracking-[0.03em] text-emerald-900 md:text-[1.85rem]">
+                            {displayPromptText || "暂无原文提示"}
+                          </p>
+                        </div>
+                      )}
                     </div>
                   </>
                 ) : (
@@ -6115,7 +7957,11 @@ const parseCustomViews = (
           right >= 0 &&
           right < totalPages);
       if (leftValid && rightValid && (left !== null || right !== null)) {
-        normalized.push({ kind: "spread", pages: [left, right] });
+        if (typeof left === "number" && typeof right === "number" && left === right) {
+          normalized.push({ kind: "single", pages: [left] });
+        } else {
+          normalized.push({ kind: "spread", pages: [left, right] });
+        }
       }
     }
   }
@@ -6162,7 +8008,20 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
     () =>
       views.flatMap((item, index) => {
         if (item.kind === "single") {
-          return [{ viewIndex: index, focus: 0 as const, pageIndex: item.pages[0] }];
+          const pageIndex = item.pages[0];
+          const pageText = getDisplayPageText(
+            document.analysis.title,
+            pageIndex,
+            shadowTexts[pageIndex] || ""
+          );
+          const { leftText, rightText } = splitDualPageText(pageText);
+          if (leftText && rightText) {
+            return [
+              { viewIndex: index, focus: 0 as const, pageIndex },
+              { viewIndex: index, focus: 1 as const, pageIndex },
+            ];
+          }
+          return [{ viewIndex: index, focus: 0 as const, pageIndex }];
         }
 
         const left = item.pages[0];
@@ -6235,23 +8094,44 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
   const canNext = safeStepIndex < navigationSteps.length - 1;
   const leftPageIndex =
     activeView.kind === "spread" ? activeView.pages[0] : activeView.pages[0];
-  const rightPageIndex = activeView.kind === "spread" ? activeView.pages[1] : null;
+  const singlePageText =
+    activeView.kind === "single" && typeof activeView.pages[0] === "number"
+      ? getDisplayPageText(
+          document.analysis.title,
+          activeView.pages[0],
+          shadowTexts[activeView.pages[0]] || ""
+        )
+      : "";
+  const singlePageTextParts = splitDualPageText(singlePageText);
+  const isSingleDualTextView =
+    activeView.kind === "single" &&
+    Boolean(singlePageTextParts.leftText.trim() && singlePageTextParts.rightText.trim());
+  const rightPageIndex =
+    activeView.kind === "spread"
+      ? activeView.pages[1]
+      : isSingleDualTextView
+        ? activeView.pages[0]
+        : null;
   const leftText =
-    typeof leftPageIndex === "number" && typeof shadowTexts[leftPageIndex] === "string"
-      ? getDisplayPageText(
-          document.analysis.title,
-          leftPageIndex,
-          shadowTexts[leftPageIndex]
-        )
-      : "";
+    isSingleDualTextView
+      ? singlePageTextParts.leftText
+      : typeof leftPageIndex === "number" && typeof shadowTexts[leftPageIndex] === "string"
+        ? getDisplayPageText(
+            document.analysis.title,
+            leftPageIndex,
+            shadowTexts[leftPageIndex]
+          )
+        : "";
   const rightText =
-    typeof rightPageIndex === "number" && typeof shadowTexts[rightPageIndex] === "string"
-      ? getDisplayPageText(
-          document.analysis.title,
-          rightPageIndex,
-          shadowTexts[rightPageIndex]
-        )
-      : "";
+    isSingleDualTextView
+      ? singlePageTextParts.rightText
+      : typeof rightPageIndex === "number" && typeof shadowTexts[rightPageIndex] === "string"
+        ? getDisplayPageText(
+            document.analysis.title,
+            rightPageIndex,
+            shadowTexts[rightPageIndex]
+          )
+        : "";
   const isLeftBlankPage = activeView.kind === "spread" && activeView.pages[0] === null;
   const isRightBlankPage = activeView.kind === "spread" && activeView.pages[1] === null;
   const leftDisplayText = isLeftBlankPage ? "" : leftText || "";
@@ -6368,13 +8248,17 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
         ? mergedSpreadPageIndex
       : spreadPageIndexes[Math.min(spreadFocus, spreadPageIndexes.length - 1)];
   const activeTargetText =
-    activeView.kind === "spread"
-      ? shouldMergeSpreadTextBox
-        ? mergedSpreadText
-        : spreadFocus === 0
-          ? leftText
-          : rightText
-      : leftText;
+    isSingleDualTextView
+      ? spreadFocus === 0
+        ? leftText
+        : rightText
+      : activeView.kind === "spread"
+        ? shouldMergeSpreadTextBox
+          ? mergedSpreadText
+          : spreadFocus === 0
+            ? leftText
+            : rightText
+        : leftText;
   const activeKey =
     typeof activePageIndex === "number"
       ? `${document.id}:${activePageIndex}:${spreadFocus}`
@@ -6385,10 +8269,13 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
     () =>
       navigationSteps.filter((step) =>
         Boolean(
-          getDisplayPageText(
-            document.analysis.title,
-            step.pageIndex,
-            shadowTexts[step.pageIndex] || ""
+          getShadowStepText(
+            getDisplayPageText(
+              document.analysis.title,
+              step.pageIndex,
+              shadowTexts[step.pageIndex] || ""
+            ),
+            step.focus
           ).trim()
         )
       ),
@@ -6434,6 +8321,7 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
       )
       .map((item) => ({
         pageIndex: item.pageIndex,
+        slot: normalizeAudioSegmentSlot(item.slot),
         trackIndex: item.trackIndex,
         startSec: Math.max(0, item.startSec || 0),
         endSec: Math.max(Math.max(0, item.startSec || 0) + 0.15, item.endSec || 0),
@@ -6442,12 +8330,25 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
     if (!validExisting.length) {
       return [];
     }
-    return validExisting.sort((left, right) => left.pageIndex - right.pageIndex);
+    return validExisting.sort((left, right) =>
+      left.pageIndex === right.pageIndex
+        ? AUDIO_SLOT_ORDER[left.slot] - AUDIO_SLOT_ORDER[right.slot]
+        : left.pageIndex - right.pageIndex
+    );
   }, [document.shadowAudio, shadowTexts, totalPages]);
 
-  const buildAudioUnitForPage = (pageIndex: number) => {
+  const buildAudioUnitForPage = (
+    pageIndex: number,
+    slot: AudioSegmentSlot = "single",
+    fallbackText?: string
+  ) => {
     const segment =
-      effectivePageSegments.find((item) => item.pageIndex === pageIndex) || null;
+      effectivePageSegments.find(
+        (item) => item.pageIndex === pageIndex && item.slot === normalizeAudioSegmentSlot(slot)
+      ) ||
+      (slot === "single"
+        ? effectivePageSegments.find((item) => item.pageIndex === pageIndex) || null
+        : null);
     if (!segment) {
       return null;
     }
@@ -6457,25 +8358,47 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
       url,
       startSec: segment.startSec,
       endSec: segment.endSec,
-      pageText: getDisplayPageText(
-        document.analysis.title,
-        pageIndex,
-        shadowTexts[pageIndex] || ""
-      ),
+      slot: segment.slot,
+      pageText:
+        fallbackText ||
+        getTextForAudioSlot(
+          getDisplayPageText(document.analysis.title, pageIndex, shadowTexts[pageIndex] || ""),
+          segment.slot
+        ),
     };
   };
 
   const activeAudioUnit =
-    typeof activePageIndex === "number" ? buildAudioUnitForPage(activePageIndex) : null;
+    typeof activePageIndex === "number"
+      ? buildAudioUnitForPage(
+          activePageIndex,
+          isSingleDualTextView ? (spreadFocus === 0 ? "left" : "right") : "single",
+          activeTargetText
+        )
+      : null;
 
   const hasPlayableAudio = Boolean(activeAudioUnit?.url);
 
   const leftHasPlayableAudio =
-    typeof leftPageIndex === "number" && Boolean(buildAudioUnitForPage(leftPageIndex)?.url);
+    typeof leftPageIndex === "number" &&
+    Boolean(
+      buildAudioUnitForPage(
+        leftPageIndex,
+        isSingleDualTextView ? "left" : "single",
+        leftDisplayText
+      )?.url
+    );
   const rightHasPlayableAudio =
-    typeof rightPageIndex === "number" && Boolean(buildAudioUnitForPage(rightPageIndex)?.url);
+    typeof rightPageIndex === "number" &&
+    Boolean(
+      buildAudioUnitForPage(
+        rightPageIndex,
+        isSingleDualTextView ? "right" : "single",
+        rightDisplayText
+      )?.url
+    );
   const viewHasPlayableAudio =
-    activeView.kind === "spread"
+    activeView.kind === "spread" || isSingleDualTextView
       ? leftHasPlayableAudio || rightHasPlayableAudio
       : hasPlayableAudio;
   const currentProgress =
@@ -6484,7 +8407,9 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
   const canNextAction = canNext;
   const currentAutoPlayKey =
     typeof activePageIndex === "number"
-      ? `${document.id}:${safeStepIndex}:${safeIndex}:${spreadFocus}:${activePageIndex}`
+      ? `${document.id}:${safeStepIndex}:${safeIndex}:${spreadFocus}:${activePageIndex}:${
+          isSingleDualTextView ? (spreadFocus === 0 ? "left" : "right") : "single"
+        }`
       : null;
 
   const playAudioUnit = (
@@ -6571,10 +8496,12 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
 
   const startPagePlayback = (
     pageIndex: number,
+    slot: AudioSegmentSlot = "single",
+    textOverride?: string,
     onFinish?: () => void,
     options?: { preserveSequenceToken?: boolean }
   ) => {
-    const unit = buildAudioUnitForPage(pageIndex);
+    const unit = buildAudioUnitForPage(pageIndex, slot, textOverride);
     if (!unit) return false;
     stopAudioPlayback(!(options?.preserveSequenceToken ?? false));
     setIsPlayingAudio(true);
@@ -6590,7 +8517,11 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
     if (!hasPlayableAudio || typeof activePageIndex !== "number") {
       return;
     }
-    startPagePlayback(activePageIndex);
+    startPagePlayback(
+      activePageIndex,
+      isSingleDualTextView ? (spreadFocus === 0 ? "left" : "right") : "single",
+      activeTargetText
+    );
   };
 
   const submitRecordedSessionForScoring = async (
@@ -6611,10 +8542,13 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
       const mergedAudio = await renderMergedAudioToWav(orderedClips);
       const referenceText = recordableSteps
         .map((step) =>
-          getDisplayPageText(
-            document.analysis.title,
-            step.pageIndex,
-            shadowTexts[step.pageIndex] || ""
+          getShadowStepText(
+            getDisplayPageText(
+              document.analysis.title,
+              step.pageIndex,
+              shadowTexts[step.pageIndex] || ""
+            ),
+            step.focus
           ).trim()
         )
         .filter(Boolean)
@@ -6661,7 +8595,11 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
     }
 
     clearPagePracticeState();
-    const started = startPagePlayback(activePageIndex);
+    const started = startPagePlayback(
+      activePageIndex,
+      isSingleDualTextView ? (spreadFocus === 0 ? "left" : "right") : "single",
+      activeTargetText
+    );
     if (started && currentAutoPlayKey) {
       lastAutoPlayKeyRef.current = currentAutoPlayKey;
     }
@@ -6734,8 +8672,11 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
       setStepIndex(targetStepIndex);
       return;
     }
-    lastAutoPlayKeyRef.current = `${document.id}:${safeIndex}:${side === "left" ? 0 : 1}:${pageIndex}`;
-    startPagePlayback(pageIndex);
+    const slot: AudioSegmentSlot =
+      isSingleDualTextView ? (side === "left" ? "left" : "right") : "single";
+    const targetText = side === "left" ? leftDisplayText : rightDisplayText;
+    lastAutoPlayKeyRef.current = `${document.id}:${safeIndex}:${side === "left" ? 0 : 1}:${pageIndex}:${slot}`;
+    startPagePlayback(pageIndex, slot, targetText);
   };
 
   const handleRecordToggle = async () => {
@@ -6935,9 +8876,9 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
             </button>
 
             <div className="min-w-0">
-              {view.kind === "spread" ? (
+              {view.kind === "spread" || isSingleDualTextView ? (
                 <div className="grid gap-3 text-left sm:grid-cols-2">
-                  {shouldMergeSpreadTextBox ? (
+                  {view.kind === "spread" && shouldMergeSpreadTextBox ? (
                     <div
                       role={
                         hasLeftDisplayText
@@ -7019,7 +8960,7 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
                           Left Page
                         </p>
                         <p className="mt-1 text-base leading-relaxed text-slate-900">
-                          {leftDisplayText}
+                          {leftDisplayText || "暂无左页文字"}
                         </p>
                       </div>
                       <div
@@ -7045,7 +8986,7 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
                           Right Page
                         </p>
                         <p className="mt-1 text-base leading-relaxed text-slate-900">
-                          {rightDisplayText}
+                          {rightDisplayText || "暂无右页文字"}
                         </p>
                       </div>
                     </>

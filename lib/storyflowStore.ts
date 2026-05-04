@@ -11,6 +11,7 @@ export interface StoryflowPageAnalysis {
   pageTitle: string;
   storyBeat: string;
   visibleText: string;
+  clozeHint?: string;
   bilingualHint: string;
   speakingPrompt: string[];
   keyVocabulary: string[];
@@ -39,8 +40,11 @@ export interface StoryflowAudioTrack {
   durationSec: number;
 }
 
+export type StoryflowPageAudioSegmentSlot = "single" | "left" | "right";
+
 export interface StoryflowPageAudioSegment {
   pageIndex: number;
+  slot?: StoryflowPageAudioSegmentSlot;
   trackIndex: number;
   startSec: number;
   endSec: number;
@@ -134,6 +138,7 @@ export interface StoryflowDocument {
   assessments?: StoryflowTaskAssessments;
   speakingPracticeRecords?: StoryflowSpeakingPracticeRecord[];
   performanceConfig?: StoryflowPerformanceConfig;
+  pairEditorModePages?: number[];
   analysis: StoryflowAnalysis;
 }
 
@@ -243,6 +248,85 @@ const normalizeStringArray = (value: unknown, limit = 8) => {
     .slice(0, limit);
 };
 
+const normalizeShadowPageTexts = (value: unknown, pageCount: number) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, Math.max(0, pageCount))
+    .map((item) => (typeof item === "string" ? item : ""));
+};
+
+const normalizeStoryflowPages = (value: unknown, pageCount: number): StoryflowPageAnalysis[] => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const current = item as Partial<StoryflowPageAnalysis>;
+      const pageIndex = toFiniteNumber(current.pageIndex, -1);
+      if (pageIndex < 0 || pageIndex >= pageCount) return null;
+
+      return {
+        pageIndex,
+        pageTitle:
+          typeof current.pageTitle === "string" && current.pageTitle.trim()
+            ? current.pageTitle.trim()
+            : `Page ${pageIndex + 1}`,
+        storyBeat: typeof current.storyBeat === "string" ? current.storyBeat : "",
+        visibleText: typeof current.visibleText === "string" ? current.visibleText : "",
+        clozeHint: typeof current.clozeHint === "string" ? current.clozeHint : "",
+        bilingualHint: typeof current.bilingualHint === "string" ? current.bilingualHint : "",
+        speakingPrompt: normalizeStringArray(current.speakingPrompt, 8),
+        keyVocabulary: normalizeStringArray(current.keyVocabulary, 8),
+      } satisfies StoryflowPageAnalysis;
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .sort((left, right) => left.pageIndex - right.pageIndex);
+};
+
+const normalizeCustomShadowViews = (
+  value: unknown,
+  pageCount: number
+): StoryflowCustomView[] | undefined => {
+  if (!Array.isArray(value) || pageCount <= 0) return undefined;
+
+  const normalized = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const current = item as Partial<StoryflowCustomView>;
+
+      if (current.kind === "single") {
+        const page = toFiniteNumber(current.pages?.[0], -1);
+        if (page < 0 || page >= pageCount) return null;
+        return { kind: "single", pages: [page] } satisfies StoryflowCustomView;
+      }
+
+      if (current.kind === "spread") {
+        const leftRaw = current.pages?.[0];
+        const rightRaw = current.pages?.[1];
+        const left =
+          leftRaw === null ? null : typeof leftRaw === "number" && leftRaw >= 0 && leftRaw < pageCount ? leftRaw : null;
+        const right =
+          rightRaw === null
+            ? null
+            : typeof rightRaw === "number" && rightRaw >= 0 && rightRaw < pageCount
+              ? rightRaw
+              : null;
+
+        if (left === null && right === null) return null;
+        if (typeof left === "number" && typeof right === "number" && left === right) {
+          return { kind: "single", pages: [left] } satisfies StoryflowCustomView;
+        }
+
+        return { kind: "spread", pages: [left, right] } satisfies StoryflowCustomView;
+      }
+
+      return null;
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  return normalized.length ? normalized : undefined;
+};
+
 const dedupeStrings = (items: string[], limit = 8) => {
   const seen = new Set<string>();
   const next: string[] = [];
@@ -257,6 +341,12 @@ const dedupeStrings = (items: string[], limit = 8) => {
   });
 
   return next.slice(0, limit);
+};
+
+const normalizeAudioSegmentSlot = (
+  value: unknown
+): StoryflowPageAudioSegmentSlot => {
+  return value === "left" || value === "right" || value === "single" ? value : "single";
 };
 
 export const buildDefaultStoryflowPerformanceConfig = (
@@ -420,10 +510,67 @@ const normalizeStoryflowDocument = (
 
   const createdAt = toFiniteNumber(item.createdAt, Date.now());
   const updatedAt = toFiniteNumber(item.updatedAt, createdAt);
-  const pageCount = toFiniteNumber(
-    item.pageCount,
-    item.pageObjectKeys?.length || item.images?.length || 0
-  );
+  const assetPageCount = Math.max(item.pageObjectKeys?.length || 0, item.images?.length || 0);
+  const pageCount = assetPageCount || toFiniteNumber(item.pageCount, 0);
+  const normalizedAnalysis: StoryflowAnalysis = {
+    ...analysis,
+    pages: normalizeStoryflowPages(analysis.pages, pageCount),
+    shadowPageTexts: normalizeShadowPageTexts(analysis.shadowPageTexts, pageCount),
+  };
+  const pairEditorModePages = Array.isArray(item.pairEditorModePages)
+    ? item.pairEditorModePages
+        .map((entry) => toFiniteNumber(entry, -1))
+        .filter((entry, index, collection) =>
+          entry >= 0 &&
+          entry < pageCount &&
+          Number.isInteger(entry) &&
+          collection.indexOf(entry) === index
+        )
+        .sort((left, right) => left - right)
+    : [];
+  const shadowAudio =
+    item.shadowAudio &&
+    typeof item.shadowAudio === "object" &&
+    Array.isArray(item.shadowAudio.tracks)
+      ? {
+          tracks: item.shadowAudio.tracks,
+          pageSegments: Array.isArray(item.shadowAudio.pageSegments)
+            ? item.shadowAudio.pageSegments
+                .map((segment) => {
+                  if (!segment || typeof segment !== "object") return null;
+                  const current = segment as Partial<StoryflowPageAudioSegment>;
+                  const pageIndex = toFiniteNumber(current.pageIndex, -1);
+                  const trackIndex = toFiniteNumber(current.trackIndex, -1);
+                  const startSec = Math.max(0, toFiniteNumber(current.startSec, 0));
+                  const endSec = Math.max(startSec + 0.15, toFiniteNumber(current.endSec, startSec + 0.15));
+                  if (pageIndex < 0 || pageIndex >= pageCount || trackIndex < 0) return null;
+                  return {
+                    pageIndex,
+                    slot: normalizeAudioSegmentSlot(current.slot),
+                    trackIndex,
+                    startSec,
+                    endSec,
+                  } satisfies StoryflowPageAudioSegment;
+                })
+                .filter(
+                  (
+                    segment
+                  ): segment is {
+                    pageIndex: number;
+                    slot: StoryflowPageAudioSegmentSlot;
+                    trackIndex: number;
+                    startSec: number;
+                    endSec: number;
+                  } => Boolean(segment)
+                )
+                .sort((left, right) => {
+                  if (left.pageIndex !== right.pageIndex) return left.pageIndex - right.pageIndex;
+                  const order = { single: 0, left: 1, right: 2 };
+                  return order[left.slot || "single"] - order[right.slot || "single"];
+                })
+            : [],
+        }
+      : undefined;
 
   return {
     ...item,
@@ -445,9 +592,12 @@ const normalizeStoryflowDocument = (
         ? item.category.trim()
         : "",
     pageCount,
+    customShadowViews: normalizeCustomShadowViews(item.customShadowViews, pageCount),
+    shadowAudio,
+    pairEditorModePages,
     speakingPracticeRecords: normalizeSpeakingPracticeRecords(item.speakingPracticeRecords),
-    performanceConfig: normalizeStoryflowPerformanceConfig(item.performanceConfig, analysis),
-    analysis,
+    performanceConfig: normalizeStoryflowPerformanceConfig(item.performanceConfig, normalizedAnalysis),
+    analysis: normalizedAnalysis,
   };
 };
 

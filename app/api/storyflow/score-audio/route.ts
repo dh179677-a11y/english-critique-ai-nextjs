@@ -172,6 +172,74 @@ const getString = (value: FormDataEntryValue | null) =>
 const clampScore = (value: number) =>
   Math.max(0, Math.min(100, Math.round(value)));
 
+const trimToLength = (value: string, maxLength: number) => {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+};
+
+const pickWeakestDimension = (result: Pick<
+  AnalysisResult,
+  "fluency" | "pronunciation" | "intonation" | "vocabulary" | "emotion"
+>) => {
+  const dimensions = [
+    { key: "fluency", label: "流畅度", score: result.fluency.score },
+    { key: "pronunciation", label: "发音清晰度", score: result.pronunciation.score },
+    { key: "intonation", label: "语调节奏", score: result.intonation.score },
+    { key: "vocabulary", label: "目标句复现", score: result.vocabulary.score },
+    { key: "emotion", label: "表达状态", score: result.emotion.score },
+  ] as const;
+  return [...dimensions].sort((left, right) => left.score - right.score)[0];
+};
+
+const buildSimpleShadowComment = (
+  result: Pick<
+    AnalysisResult,
+    "studentName" | "fluency" | "pronunciation" | "intonation" | "vocabulary" | "emotion"
+  >
+) => {
+  const studentName = result.studentName?.trim() || "你";
+  const averageScore = Math.round(
+    (result.fluency.score +
+      result.pronunciation.score +
+      result.intonation.score +
+      result.vocabulary.score +
+      result.emotion.score) /
+      5
+  );
+  const weakest = pickWeakestDimension(result);
+  const praise =
+    averageScore >= 88
+      ? `${studentName}这次跟读完成得很不错，整体听起来比较顺，也能跟上原文节奏。`
+      : averageScore >= 75
+        ? `${studentName}这次跟读完成得不错，主要内容都读出来了，基础已经有了。`
+        : `${studentName}这次愿意完整跟读很好，先把整段坚持读完就是很好的进步。`;
+  const issueMap: Record<string, string> = {
+    fluency: "现在最需要继续练的是连读时的顺畅度，停顿还有点多。",
+    pronunciation: "现在最需要继续练的是发音清晰度，部分词还不够稳。",
+    intonation: "现在最需要继续练的是语调和节奏，句子起伏还不够明显。",
+    vocabulary: "现在最需要继续练的是把目标句完整准确地读出来，容易漏词或换词。",
+    emotion: "现在最需要继续练的是表达状态，声音可以再更自然、更自信一些。",
+  };
+  const solutionMap: Record<string, string> = {
+    fluency: "建议先逐句慢读 2 遍，再整段连起来读 1 遍。",
+    pronunciation: "建议把最容易读错的词单独拆出来反复跟读，再放回原句。",
+    intonation: "建议先听老师原音，再整句模仿重音和句末语气。",
+    vocabulary: "建议先看着文本逐句核对，再闭眼复述关键词后重读。",
+    emotion: "建议录音时把声音再放开一点，重点词大胆读出来。",
+  };
+
+  return trimToLength(`${praise}${issueMap[weakest.key]}${solutionMap[weakest.key]}`, 200);
+};
+
+const withSimpleComment = (result: AnalysisResult): AnalysisResult => ({
+  ...result,
+  simpleComment: trimToLength(
+    result.simpleComment || buildSimpleShadowComment(result),
+    200
+  ),
+});
+
 const buildFallbackResult = (
   transcript: string,
   referenceText: string,
@@ -225,6 +293,7 @@ const buildFallbackResult = (
         ? ` 本次识别到的整段内容为：${transcript}`
         : ""
     }`,
+    simpleComment: "",
     suggestions: [
       "先逐句录音，确认每句都能稳定读清，再开始整段跟读。",
       "把容易卡住的词单独拆音练 3 次，再放回原句。",
@@ -278,6 +347,7 @@ ${Math.round(input.similarity * 100)}/100
   "vocabulary": { "score": 0, "comment": "" },
   "emotion": { "score": 0, "comment": "" },
   "overallComment": "",
+  "simpleComment": "",
   "suggestions": ["", "", "", "", ""],
   "grammarSummary": ""
 }
@@ -294,6 +364,12 @@ ${Math.round(input.similarity * 100)}/100
 - 必须点名学生
 - 第一段总结整段跟读完成度和主要问题
 - 第二段给出具体训练建议
+
+【simpleComment要求】
+- 必须用中文
+- 不超过 200 字
+- 先鼓励，再直接指出最主要的问题，再给 1 个明确解决办法
+- 语气像老师对学生说话，不要空泛
 
 【suggestions要求】
 - 返回 5 条
@@ -396,7 +472,7 @@ export async function POST(request: Request) {
       } as never);
 
       const rawText = extractChatCompletionText(response);
-      const result = parseAnalysisResult(rawText);
+      const result = withSimpleComment(parseAnalysisResult(rawText));
       return NextResponse.json({
         result,
         transcript,
@@ -405,7 +481,7 @@ export async function POST(request: Request) {
     } catch (llmError) {
       console.error("Storyflow score-audio llm fallback:", llmError);
       return NextResponse.json({
-        result: fallbackResult,
+        result: withSimpleComment(fallbackResult),
         transcript,
         similarity,
       });
