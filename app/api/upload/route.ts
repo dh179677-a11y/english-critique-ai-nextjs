@@ -20,11 +20,44 @@ const normalizeMimeType = (contentType: string | null): string => {
 
 export async function POST(req: Request) {
   try {
+    const contentType = req.headers.get("content-type") || "";
+
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await req.formData();
+      const file = formData.get("file");
+
+      if (!(file instanceof File)) {
+        return NextResponse.json({ error: "video file is required" }, { status: 400 });
+      }
+
+      const mimeType = normalizeMimeType(file.type || contentType);
+      const objectKey = createVideoObjectKey(file.name || "student-video.mp4");
+      const uploadUrl = createSignedUploadUrl(objectKey);
+      const uploadResponse = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": mimeType,
+        },
+        body: file.stream(),
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+
+      if (!uploadResponse.ok) {
+        return NextResponse.json(
+          { error: `上传到 COS 失败：${uploadResponse.status}` },
+          { status: 502 }
+        );
+      }
+
+      return NextResponse.json({
+        objectKey,
+      });
+    }
+
     const body = (await req.json()) as {
       fileName?: string;
       mimeType?: string;
     };
-
     const fileName = body.fileName?.trim();
 
     if (!fileName) {

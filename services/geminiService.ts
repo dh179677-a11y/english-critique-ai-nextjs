@@ -11,8 +11,6 @@ type SectionType = "highlights" | "pronunciation" | "grammar";
 
 interface UploadVideoResponse {
   objectKey: string;
-  uploadUrl: string;
-  mimeType: string;
 }
 
 interface AnalyzeVideoResponse {
@@ -35,15 +33,12 @@ const parseErrorMessage = async (response: Response, fallback: string) => {
 };
 
 const requestUploadUrl = async (videoFile: File): Promise<UploadVideoResponse> => {
+  const formData = new FormData();
+  formData.append("file", videoFile);
+
   const response = await fetch("/api/upload", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      fileName: videoFile.name,
-      mimeType: videoFile.type,
-    }),
+    body: formData,
   });
 
   if (!response.ok) {
@@ -54,19 +49,7 @@ const requestUploadUrl = async (videoFile: File): Promise<UploadVideoResponse> =
 };
 
 const uploadVideoFile = async (videoFile: File) => {
-  const { uploadUrl, objectKey, mimeType } = await requestUploadUrl(videoFile);
-  const response = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: {
-      "Content-Type": mimeType || videoFile.type || "video/mp4",
-    },
-    body: videoFile,
-  });
-
-  if (!response.ok) {
-    throw new Error(await parseErrorMessage(response, "Video upload failed"));
-  }
-
+  const { objectKey } = await requestUploadUrl(videoFile);
   return objectKey;
 };
 
