@@ -23,13 +23,13 @@ export async function GET(request: NextRequest) {
 
   if (!user) {
     const response = NextResponse.json({ ok: true, data: null });
-    clearSessionCookie(response);
+    clearSessionCookie(response, request);
     return response;
   }
 
   if (user.role === "student" && (user.status === "inactive" || isStudentExpired(user))) {
     const response = NextResponse.json({ ok: true, data: null });
-    clearSessionCookie(response);
+    clearSessionCookie(response, request);
     return response;
   }
 
@@ -44,8 +44,8 @@ export async function GET(request: NextRequest) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(request: NextRequest) {
   const response = NextResponse.json({ ok: true });
-  clearSessionCookie(response);
+  clearSessionCookie(response, request);
   return response;
 }

@@ -831,7 +831,7 @@ export async function POST(request: NextRequest) {
           return fail(result.error);
         }
         const response = ok(result.data);
-        setSessionCookie(response, result.data);
+        setSessionCookie(response, result.data, request);
         return response;
       }
       case "registerTeacher": {
@@ -840,7 +840,7 @@ export async function POST(request: NextRequest) {
           return fail(result.error);
         }
         const response = ok(result.data);
-        setSessionCookie(response, result.data);
+        setSessionCookie(response, result.data, request);
         return response;
       }
       case "getTeacherClasses":

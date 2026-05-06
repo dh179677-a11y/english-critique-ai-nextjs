@@ -30,6 +30,24 @@ function sign(input: string) {
   return createHmac("sha256", getSessionSecret()).update(input).digest("base64url");
 }
 
+function shouldUseSecureCookie(request?: NextRequest) {
+  const override = process.env.SESSION_COOKIE_SECURE?.trim().toLowerCase();
+
+  if (override === "true") return true;
+  if (override === "false") return false;
+
+  if (request) {
+    const forwardedProto = request.headers.get("x-forwarded-proto");
+    if (forwardedProto) {
+      return forwardedProto.split(",")[0].trim() === "https";
+    }
+
+    return request.nextUrl.protocol === "https:";
+  }
+
+  return process.env.NODE_ENV === "production";
+}
+
 export function toSessionUser(user: AppUser | SessionUser): SessionUser {
   return {
     username: user.username,
@@ -88,22 +106,23 @@ export function verifySessionToken(token?: string | null): SessionUser | null {
 
 export function setSessionCookie(
   response: NextResponse,
-  user: AppUser | SessionUser
+  user: AppUser | SessionUser,
+  request?: NextRequest
 ) {
   response.cookies.set(SESSION_COOKIE_NAME, createSessionToken(user), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldUseSecureCookie(request),
     path: "/",
     maxAge: SESSION_MAX_AGE,
   });
 }
 
-export function clearSessionCookie(response: NextResponse) {
+export function clearSessionCookie(response: NextResponse, request?: NextRequest) {
   response.cookies.set(SESSION_COOKIE_NAME, "", {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldUseSecureCookie(request),
     path: "/",
     maxAge: 0,
   });
