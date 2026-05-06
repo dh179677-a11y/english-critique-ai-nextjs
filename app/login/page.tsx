@@ -4,11 +4,17 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useEffect, useState } from "react";
 import {
+  clearSessionUser,
   getHomePathForRole,
-  getSessionProfile,
-  hasTeacherAccount,
-  loginUser,
+  setSessionUser,
 } from "@/lib/clientAuth";
+import {
+  bootstrapPortalFromLocal,
+  getServerSession,
+  hasTeacherAccount,
+  hydrateSessionCache,
+  loginUser,
+} from "@/lib/portalClient";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -16,29 +22,64 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [teacherReady, setTeacherReady] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    const session = getSessionProfile();
-    if (session) {
-      router.replace(getHomePathForRole(session.role));
-      return;
-    }
+    let cancelled = false;
 
-    setTeacherReady(hasTeacherAccount());
+    const run = async () => {
+      try {
+        const session = await getServerSession();
+        if (session) {
+          setSessionUser(session);
+          router.replace(getHomePathForRole(session.role));
+          return;
+        }
+
+        clearSessionUser();
+        await bootstrapPortalFromLocal();
+        const ready = await hasTeacherAccount();
+        if (!cancelled) {
+          setTeacherReady(ready);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "初始化登录数据失败");
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSubmitting(true);
 
-    const result = loginUser({ username, password });
-
-    if (!result.ok) {
-      setError(result.message);
-      return;
+    try {
+      await bootstrapPortalFromLocal();
+      const user = await loginUser({ username, password });
+      setSessionUser(user);
+      await hydrateSessionCache(
+        {
+          username: user.username,
+          role: user.role,
+          displayName: user.displayName,
+          teacherUsername: user.teacherUsername,
+        },
+        user
+      );
+      router.replace(getHomePathForRole(user.role));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "登录失败，请稍后重试");
+    } finally {
+      setSubmitting(false);
     }
-
-    router.replace(result.data.redirectTo);
   };
 
   return (
@@ -137,9 +178,10 @@ export default function LoginPage() {
 
               <button
                 type="submit"
+                disabled={submitting}
                 className="w-full rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
-                进入系统
+                {submitting ? "登录中..." : "进入系统"}
               </button>
             </form>
 

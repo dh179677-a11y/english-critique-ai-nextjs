@@ -4,12 +4,14 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/components/AuthGate";
-import { clearSessionUser, getSessionProfile } from "@/lib/clientAuth";
+import { getSessionProfile } from "@/lib/clientAuth";
 import {
+  bootstrapPortalFromLocal,
   getUserRecordById,
+  logoutUser,
   updateUserRecord,
-  type UserAnalysisRecord,
-} from "@/lib/clientRecords";
+} from "@/lib/portalClient";
+import type { UserAnalysisRecord } from "@/lib/clientRecords";
 import ScoreChart from "@/components/ScoreChart";
 import FeedbackSection from "@/components/FeedbackSection";
 import type { AnalysisResult } from "@/types";
@@ -24,25 +26,45 @@ function RecordDetailContent() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current) {
-      router.replace("/login");
-      return;
-    }
+    let cancelled = false;
 
-    const id = params?.id;
-    if (!id || typeof id !== "string") {
-      setReady(true);
-      return;
-    }
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) {
+        router.replace("/login");
+        return;
+      }
 
-    setUsername(current.username);
-    setRecord(getUserRecordById(current.username, id));
-    setReady(true);
+      const id = params?.id;
+      if (!id || typeof id !== "string") {
+        setReady(true);
+        return;
+      }
+
+      setUsername(current.username);
+
+      try {
+        await bootstrapPortalFromLocal();
+        const nextRecord = await getUserRecordById(current.username, id);
+        if (!cancelled) {
+          setRecord(nextRecord);
+        }
+      } finally {
+        if (!cancelled) {
+          setReady(true);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [params, router]);
 
-  const handleLogout = () => {
-    clearSessionUser();
+  const handleLogout = async () => {
+    await logoutUser();
     router.replace("/login");
   };
 
@@ -53,11 +75,15 @@ function RecordDetailContent() {
     tutorName: r.tutorName,
   });
 
-  const handleDetailDataChange = (newData: AnalysisResult) => {
+  const handleDetailDataChange = async (newData: AnalysisResult) => {
     if (!record) return;
 
     setRecord({ ...record, result: newData });
-    updateUserRecord(username, record.id, newData);
+    try {
+      await updateUserRecord(username, record.id, newData);
+    } catch {
+      setRecord(record);
+    }
   };
 
   if (!ready) {

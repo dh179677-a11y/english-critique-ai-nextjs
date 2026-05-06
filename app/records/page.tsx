@@ -4,11 +4,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import AuthGate from "@/components/AuthGate";
-import { clearSessionUser, getSessionProfile } from "@/lib/clientAuth";
+import { getSessionProfile } from "@/lib/clientAuth";
 import {
+  bootstrapPortalFromLocal,
   getUserRecords,
-  type UserAnalysisRecord,
-} from "@/lib/clientRecords";
+  logoutUser,
+} from "@/lib/portalClient";
+import type { UserAnalysisRecord } from "@/lib/clientRecords";
 import type { AnalysisResult } from "@/types";
 
 const formatDateTime = (ts: number) =>
@@ -26,15 +28,35 @@ function RecordsContent() {
   const [records, setRecords] = useState<UserAnalysisRecord[]>([]);
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current) {
-      router.replace("/login");
-      return;
-    }
+    let cancelled = false;
 
-    setUsername(current.displayName || current.username);
-    const list = getUserRecords(current.username);
-    setRecords(list);
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) {
+        router.replace("/login");
+        return;
+      }
+
+      setUsername(current.displayName || current.username);
+
+      try {
+        await bootstrapPortalFromLocal();
+        const list = await getUserRecords(current.username);
+        if (!cancelled) {
+          setRecords(list);
+        }
+      } catch {
+        if (!cancelled) {
+          setRecords([]);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   const headerText = useMemo(() => {
@@ -42,8 +64,8 @@ function RecordsContent() {
     return `${username} 的测评记录`;
   }, [username]);
 
-  const handleLogout = () => {
-    clearSessionUser();
+  const handleLogout = async () => {
+    await logoutUser();
     router.replace("/login");
   };
 

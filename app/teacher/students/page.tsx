@@ -5,18 +5,21 @@ import React, { useEffect, useMemo, useState } from "react";
 import AuthGate from "@/components/AuthGate";
 import TeacherShell from "@/components/teacher/TeacherShell";
 import {
-  assignStudentClass,
-  deleteStudentAccount,
   getSessionProfile,
   getStudentStatusLabel,
-  getTeacherClasses,
-  getTeacherStudents,
-  resetStudentPassword,
-  setStudentStatus,
   type AppUser,
   type SessionUser,
   type TeacherClass,
 } from "@/lib/clientAuth";
+import {
+  assignStudentClass,
+  bootstrapPortalFromLocal,
+  deleteStudentAccount,
+  getTeacherClasses,
+  getTeacherStudents,
+  resetStudentPassword,
+  setStudentStatus,
+} from "@/lib/portalClient";
 
 type StatusFilter = "all" | "active" | "inactive" | "expired";
 
@@ -35,17 +38,40 @@ function TeacherStudentsContent() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [menuId, setMenuId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const loadData = (current: SessionUser) => {
-    setStudents(getTeacherStudents(current.username));
-    setClasses(getTeacherClasses(current.username));
+  const loadData = async (current: SessionUser) => {
+    const [nextStudents, nextClasses] = await Promise.all([
+      getTeacherStudents(current.username),
+      getTeacherClasses(current.username),
+    ]);
+    setStudents(nextStudents);
+    setClasses(nextClasses);
   };
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current) return;
-    setSession(current);
-    loadData(current);
+    let cancelled = false;
+
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) return;
+      setSession(current);
+
+      try {
+        await bootstrapPortalFromLocal();
+        await loadData(current);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const filteredStudents = useMemo(() => {
@@ -66,7 +92,7 @@ function TeacherStudentsContent() {
     });
   }, [keyword, statusFilter, students]);
 
-  if (!session) {
+  if (!session || loading) {
     return null;
   }
 
@@ -94,10 +120,16 @@ function TeacherStudentsContent() {
       return;
     }
 
+    const loginUrl =
+      typeof window === "undefined"
+        ? "/login"
+        : `${window.location.origin}/login`;
     const content = targets
       .map(
         (student) =>
-          `${student.displayName}\n账号：${student.username}\n密码：${student.password}\n登录地址：http://localhost:3000/login`
+          `${student.displayName}\n账号：${student.username}\n密码：${
+            student.password || "当前不显示原密码，请先在老师端重置密码"
+          }\n登录地址：${loginUrl}`
       )
       .join("\n\n");
 
@@ -109,50 +141,57 @@ function TeacherStudentsContent() {
     }
   };
 
-  const handleAssignClass = (studentId: string, classId: string) => {
-    const result = assignStudentClass(session.username, studentId, classId);
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+  const handleAssignClass = async (studentId: string, classId: string) => {
+    try {
+      const result = await assignStudentClass(session.username, studentId, classId);
+      setMessage(`已更新 ${result.displayName} 的班级`);
+      await loadData(session);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "更新班级失败");
     }
-    setMessage(`已更新 ${result.data.displayName} 的班级`);
-    loadData(session);
   };
 
-  const handleResetPassword = (studentId: string) => {
-    const result = resetStudentPassword(session.username, studentId);
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+  const handleResetPassword = async (studentId: string) => {
+    try {
+      const result = await resetStudentPassword(session.username, studentId);
+      setMessage(`学员密码已重置，新密码：${result.password}`);
+      setMenuId(null);
+      await loadData(session);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "重置密码失败");
     }
-    setMessage(`学员密码已重置，新密码：${result.data.password}`);
-    setMenuId(null);
-    loadData(session);
   };
 
-  const handleStatusChange = (studentId: string, nextStatus: "active" | "inactive") => {
-    const result = setStudentStatus(session.username, studentId, nextStatus);
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+  const handleStatusChange = async (
+    studentId: string,
+    nextStatus: "active" | "inactive"
+  ) => {
+    try {
+      const result = await setStudentStatus(
+        session.username,
+        studentId,
+        nextStatus
+      );
+      setMessage(
+        `${result.displayName} 已${nextStatus === "active" ? "启用" : "停用"}`
+      );
+      setMenuId(null);
+      await loadData(session);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "更新状态失败");
     }
-    setMessage(
-      `${result.data.displayName} 已${nextStatus === "active" ? "启用" : "停用"}`
-    );
-    setMenuId(null);
-    loadData(session);
   };
 
-  const handleDelete = (studentId: string) => {
-    const result = deleteStudentAccount(session.username, studentId);
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+  const handleDelete = async (studentId: string) => {
+    try {
+      await deleteStudentAccount(session.username, studentId);
+      setMessage("学员账号已删除");
+      setMenuId(null);
+      setSelectedIds((current) => current.filter((id) => id !== studentId));
+      await loadData(session);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "删除学员失败");
     }
-    setMessage("学员账号已删除");
-    setMenuId(null);
-    setSelectedIds((current) => current.filter((id) => id !== studentId));
-    loadData(session);
   };
 
   return (

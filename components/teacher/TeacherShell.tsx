@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import React from "react";
-import { clearSessionUser, type SessionUser } from "@/lib/clientAuth";
+import { type SessionUser } from "@/lib/clientAuth";
+import { logoutUser } from "@/lib/portalClient";
 
 interface TeacherShellProps {
   session: SessionUser;
@@ -21,8 +22,8 @@ const TeacherShell: React.FC<TeacherShellProps> = ({
   backHref,
   actions,
 }) => {
-  const handleLogout = () => {
-    clearSessionUser();
+  const handleLogout = async () => {
+    await logoutUser();
     window.location.href = "/login";
   };
 

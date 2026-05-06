@@ -8,8 +8,6 @@ import TeacherShell from "@/components/teacher/TeacherShell";
 import {
   getSessionProfile,
   getStudentStatusLabel,
-  getTeacherClassById,
-  getTeacherStudents,
   type AppUser,
   type SessionUser,
   type TeacherClass,
@@ -24,9 +22,12 @@ import {
   type ClassWorkspaceView,
 } from "@/lib/classPortal";
 import {
+  bootstrapPortalFromLocal,
+  getTeacherClassById,
+  getTeacherStudents,
   getUserRecords,
-  type UserAnalysisRecord,
-} from "@/lib/clientRecords";
+} from "@/lib/portalClient";
+import type { UserAnalysisRecord } from "@/lib/clientRecords";
 
 type CoursePanel = "schedule" | "attendance" | "progress";
 type MemberPanel = "students" | "teachers";
@@ -92,6 +93,9 @@ function TeacherClassDetailContent() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [classInfo, setClassInfo] = useState<TeacherClass | null>(null);
   const [students, setStudents] = useState<AppUser[]>([]);
+  const [recordsByUsername, setRecordsByUsername] = useState<
+    Record<string, UserAnalysisRecord[]>
+  >({});
   const [videoUrl, setVideoUrl] = useState("");
   const [videoError, setVideoError] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -103,18 +107,58 @@ function TeacherClassDetailContent() {
   const [memberKeyword, setMemberKeyword] = useState("");
   const [taskKeyword, setTaskKeyword] = useState("");
   const [materialMenuOpen, setMaterialMenuOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const classId = params?.id;
   const activeView = resolveView(searchParams.get("view"));
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current || !classId || typeof classId !== "string") return;
+    let cancelled = false;
 
-    setSession(current);
-    setClassInfo(getTeacherClassById(current.username, classId));
-    setStudents(getTeacherStudents(current.username));
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current || !classId || typeof classId !== "string") return;
+
+      setSession(current);
+
+      try {
+        await bootstrapPortalFromLocal();
+        const [nextClassInfo, nextStudents] = await Promise.all([
+          getTeacherClassById(current.username, classId),
+          getTeacherStudents(current.username),
+        ]);
+        const recordLists = await Promise.all(
+          nextStudents.map((student) => getUserRecords(student.username))
+        );
+
+        if (cancelled) return;
+
+        setClassInfo(nextClassInfo);
+        setStudents(nextStudents);
+        setRecordsByUsername(
+          Object.fromEntries(
+            nextStudents.map((student, index) => [
+              student.username,
+              recordLists[index],
+            ])
+          )
+        );
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [classId]);
+
+  const getRecordsForStudent = (username: string) =>
+    recordsByUsername[username] || [];
 
   const currentStudents = useMemo(
     () => students.filter((student) => student.classId === classInfo?.id),
@@ -135,7 +179,7 @@ function TeacherClassDetailContent() {
 
   const taskEntries = useMemo<TaskEntry[]>(() => {
     const entries = currentStudents.flatMap((student) =>
-      getUserRecords(student.username).map((record) => ({
+      getRecordsForStudent(student.username).map((record) => ({
         id: `${student.id}_${record.id}`,
         student,
         record,
@@ -165,7 +209,7 @@ function TeacherClassDetailContent() {
         return haystack.includes(query);
       })
       .sort((left, right) => right.record.createdAt - left.record.createdAt);
-  }, [currentStudents, taskKeyword, taskPanel]);
+  }, [currentStudents, recordsByUsername, taskKeyword, taskPanel]);
 
   useEffect(() => {
     if (!taskEntries.length) {
@@ -225,7 +269,7 @@ function TeacherClassDetailContent() {
   const leaderboard = useMemo(() => {
     return currentStudents
       .map((student) => {
-        const records = getUserRecords(student.username);
+        const records = getRecordsForStudent(student.username);
 
         return {
           student,
@@ -236,7 +280,7 @@ function TeacherClassDetailContent() {
         };
       })
       .sort((left, right) => right[rankingPanel] - left[rankingPanel]);
-  }, [currentStudents, rankingPanel]);
+  }, [currentStudents, rankingPanel, recordsByUsername]);
 
   const overview = useMemo(() => {
     const active = currentStudents.filter(
@@ -256,7 +300,7 @@ function TeacherClassDetailContent() {
     router.replace(`/teacher/classes/${classId}?${params.toString()}`);
   };
 
-  if (!session) {
+  if (!session || loading) {
     return null;
   }
 
@@ -383,7 +427,7 @@ function TeacherClassDetailContent() {
               </div>
             ) : (
               currentStudents.map((student) => {
-                const recordCount = getUserRecords(student.username).length;
+                const recordCount = getRecordsForStudent(student.username).length;
                 const progress = Math.min(100, recordCount * 12);
 
                 return (

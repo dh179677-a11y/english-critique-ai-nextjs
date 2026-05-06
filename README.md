@@ -31,6 +31,7 @@ COS_BUCKET=你的存储桶名称
 COS_REGION=ap-guangzhou
 COS_OBJECT_PREFIX=videos
 NEXT_PUBLIC_INVITE_CODE=VIP888
+SESSION_SECRET=一段足够长的随机字符串
 ```
 
 ### 3. 启动开发环境
@@ -92,6 +93,7 @@ COS_BUCKET=你的存储桶名称
 COS_REGION=ap-guangzhou
 COS_OBJECT_PREFIX=videos
 NEXT_PUBLIC_INVITE_CODE=VIP888
+SESSION_SECRET=一段足够长的随机字符串
 ```
 
 `ecosystem.config.cjs` 会在启动时自动读取项目根目录下的 `.env.production`。
@@ -161,6 +163,8 @@ pm2 restart english-critique-ai --update-env
 ## 部署注意事项
 
 - 当前版本会先从浏览器直传视频到腾讯云 COS，再把 `objectKey` 发给 `/api/analyze`。
+- 登录态使用服务端签名的 `httpOnly cookie`，生产环境必须配置 `SESSION_SECRET`。
+- 账号、班级、测评记录当前保存在服务器本地 `data/portal-store.json`，适合单机部署；如果后面改成多机或 Serverless，需要迁移到数据库。
 - 分析接口会在服务端生成临时下载链接，再交给上游 LLM 读取。
 - Nginx 仍建议保留较大的 `client_max_body_size`，但大文件不再穿过 Next.js 服务端。
 - COS 存储桶建议保持私有读写，项目会按需生成临时签名链接。

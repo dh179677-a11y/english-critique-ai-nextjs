@@ -6,8 +6,8 @@ import { AppStatus, AnalysisResult } from './types';
 import { analyzeStudentVideo, VideoMetadata } from './services/geminiService';
 import ScoreChart from './components/ScoreChart';
 import FeedbackSection from './components/FeedbackSection';
-import { clearSessionUser, getSessionProfile } from './lib/clientAuth';
-import { saveUserRecord } from './lib/clientRecords';
+import { getSessionProfile } from './lib/clientAuth';
+import { bootstrapPortalFromLocal, logoutUser, saveUserRecord } from './lib/portalClient';
 import { getStudentStoryflowAssignments } from './lib/storyflowAssignments';
 
 type AppProps = {
@@ -31,6 +31,8 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    void bootstrapPortalFromLocal().catch(() => undefined);
+
     const user = getSessionProfile();
     if (!user) return;
     setCurrentUser(user.displayName || user.username);
@@ -73,7 +75,7 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
       const session = getSessionProfile();
       const recordOwner = session?.username;
       if (recordOwner) {
-        saveUserRecord(recordOwner, finalResult, objectKey);
+        await saveUserRecord(recordOwner, finalResult, objectKey);
       }
 
       setStatus(AppStatus.SUCCESS);
@@ -103,8 +105,8 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
     setResult(newData);
   };
 
-  const handleLogout = () => {
-    clearSessionUser();
+  const handleLogout = async () => {
+    await logoutUser();
     window.location.href = '/login';
   };
 

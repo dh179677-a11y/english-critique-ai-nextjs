@@ -6,7 +6,12 @@ import AuthGate from "@/components/AuthGate";
 import TeacherShell from "@/components/teacher/TeacherShell";
 import { getSessionProfile, type SessionUser } from "@/lib/clientAuth";
 import {
+  bootstrapPortalFromLocal,
   getTeacherOverview,
+  syncTeacherPortalCache,
+  type TeacherOverview,
+} from "@/lib/portalClient";
+import {
   primaryTeacherModules,
   sideTeacherModules,
   utilityTeacherModules,
@@ -14,16 +19,48 @@ import {
 
 function TeacherDashboardContent() {
   const [session, setSession] = useState<SessionUser | null>(null);
+  const [overview, setOverview] = useState<TeacherOverview | null>(null);
 
   useEffect(() => {
-    setSession(getSessionProfile());
+    let cancelled = false;
+
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) return;
+
+      setSession(current);
+
+      try {
+        await bootstrapPortalFromLocal();
+        await syncTeacherPortalCache(current.username);
+        const nextOverview = await getTeacherOverview(current.username);
+        if (!cancelled) {
+          setOverview(nextOverview);
+        }
+      } catch {
+        if (!cancelled) {
+          setOverview({
+            totalStudents: 0,
+            activeStudents: 0,
+            inactiveStudents: 0,
+            neverLoggedStudents: 0,
+            totalClasses: 0,
+            totalRecords: 0,
+          });
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  if (!session) {
+  if (!session || !overview) {
     return null;
   }
-
-  const overview = getTeacherOverview(session);
 
   return (
     <TeacherShell

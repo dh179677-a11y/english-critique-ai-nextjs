@@ -3,10 +3,12 @@
 import React, { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  clearSessionUser,
   getHomePathForRole,
-  getSessionProfile,
+  setSessionUser,
   type UserRole,
 } from "@/lib/clientAuth";
+import { getServerSession } from "@/lib/portalClient";
 
 interface AuthGateProps {
   children: React.ReactNode;
@@ -19,21 +21,43 @@ const AuthGate: React.FC<AuthGateProps> = ({ children, allowedRoles }) => {
   const pathname = usePathname();
 
   useEffect(() => {
-    const currentUser = getSessionProfile();
+    let cancelled = false;
 
-    if (!currentUser) {
-      if (pathname !== "/login" && pathname !== "/register") {
-        router.replace("/login");
+    const run = async () => {
+      try {
+        const currentUser = await getServerSession();
+
+        if (!currentUser) {
+          clearSessionUser();
+          if (pathname !== "/login" && pathname !== "/register") {
+            router.replace("/login");
+          }
+          return;
+        }
+
+        setSessionUser(currentUser);
+
+        if (allowedRoles?.length && !allowedRoles.includes(currentUser.role)) {
+          router.replace(getHomePathForRole(currentUser.role));
+          return;
+        }
+
+        if (!cancelled) {
+          setReady(true);
+        }
+      } catch {
+        clearSessionUser();
+        if (pathname !== "/login" && pathname !== "/register") {
+          router.replace("/login");
+        }
       }
-      return;
-    }
+    };
 
-    if (allowedRoles?.length && !allowedRoles.includes(currentUser.role)) {
-      router.replace(getHomePathForRole(currentUser.role));
-      return;
-    }
+    void run();
 
-    setReady(true);
+    return () => {
+      cancelled = true;
+    };
   }, [allowedRoles, pathname, router]);
 
   if (!ready) {

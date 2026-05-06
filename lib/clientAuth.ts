@@ -16,6 +16,8 @@ export interface AppUser {
   id: string;
   username: string;
   password: string;
+  passwordHash?: string;
+  passwordSalt?: string;
   role: UserRole;
   displayName: string;
   createdAt: number;

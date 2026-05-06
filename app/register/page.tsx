@@ -4,11 +4,16 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useEffect, useState } from "react";
 import {
+  clearSessionUser,
   getHomePathForRole,
-  getSessionProfile,
-  registerTeacher,
   setSessionUser,
 } from "@/lib/clientAuth";
+import {
+  bootstrapPortalFromLocal,
+  getServerSession,
+  registerTeacher,
+  syncTeacherPortalCache,
+} from "@/lib/portalClient";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -17,32 +22,54 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    const session = getSessionProfile();
-    if (session) {
-      router.replace(getHomePathForRole(session.role));
-    }
+    let cancelled = false;
+
+    const run = async () => {
+      try {
+        const session = await getServerSession();
+        if (session && !cancelled) {
+          setSessionUser(session);
+          router.replace(getHomePathForRole(session.role));
+          return;
+        }
+
+        clearSessionUser();
+      } catch {
+        clearSessionUser();
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSubmitting(true);
 
-    const result = registerTeacher({
-      displayName,
-      username,
-      password,
-      inviteCode,
-    });
-
-    if (!result.ok) {
-      setError(result.message);
-      return;
+    try {
+      await bootstrapPortalFromLocal();
+      const user = await registerTeacher({
+        displayName,
+        username,
+        password,
+        inviteCode,
+      });
+      setSessionUser(user);
+      await syncTeacherPortalCache(user.username, user);
+      router.replace("/teacher");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "注册失败，请稍后重试");
+    } finally {
+      setSubmitting(false);
     }
-
-    setSessionUser(result.data);
-    router.replace("/teacher");
   };
 
   return (
@@ -116,9 +143,10 @@ export default function RegisterPage() {
 
           <button
             type="submit"
+            disabled={submitting}
             className="w-full rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
           >
-            完成老师注册
+            {submitting ? "注册中..." : "完成老师注册"}
           </button>
         </form>
 

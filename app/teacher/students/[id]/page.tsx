@@ -7,15 +7,16 @@ import TeacherShell from "@/components/teacher/TeacherShell";
 import ScoreChart from "@/components/ScoreChart";
 import {
   getSessionProfile,
-  getStudentById,
   getStudentStatusLabel,
   type AppUser,
   type SessionUser,
 } from "@/lib/clientAuth";
 import {
+  bootstrapPortalFromLocal,
+  getStudentById,
   getUserRecords,
-  type UserAnalysisRecord,
-} from "@/lib/clientRecords";
+} from "@/lib/portalClient";
+import type { UserAnalysisRecord } from "@/lib/clientRecords";
 
 const formatDateTime = (timestamp: number) =>
   new Date(timestamp).toLocaleString("zh-CN", {
@@ -34,23 +35,45 @@ function TeacherStudentDetailContent() {
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>("");
   const [videoError, setVideoError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current) return;
+    let cancelled = false;
 
-    const id = params?.id;
-    if (!id || typeof id !== "string") return;
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) return;
 
-    const currentStudent = getStudentById(current.username, id);
-    setSession(current);
-    setStudent(currentStudent);
+      const id = params?.id;
+      if (!id || typeof id !== "string") return;
 
-    if (currentStudent) {
-      const list = getUserRecords(currentStudent.username);
-      setRecords(list);
-      setSelectedRecordId(list[0]?.id || null);
-    }
+      setSession(current);
+
+      try {
+        await bootstrapPortalFromLocal();
+        const currentStudent = await getStudentById(current.username, id);
+        if (cancelled) return;
+
+        setStudent(currentStudent);
+
+        if (currentStudent) {
+          const list = await getUserRecords(currentStudent.username);
+          if (cancelled) return;
+          setRecords(list);
+          setSelectedRecordId(list[0]?.id || null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [params]);
 
   const selectedRecord = useMemo(
@@ -97,7 +120,7 @@ function TeacherStudentDetailContent() {
     };
   }, [selectedRecord]);
 
-  if (!session) {
+  if (!session || loading) {
     return null;
   }
 

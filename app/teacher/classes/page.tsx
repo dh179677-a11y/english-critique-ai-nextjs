@@ -5,16 +5,20 @@ import React, { useEffect, useMemo, useState } from "react";
 import AuthGate from "@/components/AuthGate";
 import TeacherShell from "@/components/teacher/TeacherShell";
 import {
-  createTeacherClass,
-  deleteTeacherClass,
   getSessionProfile,
-  getTeacherClasses,
-  getTeacherStudents,
+  type AppUser,
   type SessionUser,
   type TeacherClass,
 } from "@/lib/clientAuth";
 import { getClassCapacityLabel, getClassCoverTheme } from "@/lib/classPortal";
-import { getUserRecords } from "@/lib/clientRecords";
+import {
+  bootstrapPortalFromLocal,
+  createTeacherClass,
+  deleteTeacherClass,
+  getTeacherClasses,
+  getTeacherStudents,
+  getUserRecords,
+} from "@/lib/portalClient";
 
 type ClassFilter = "all" | "with_students" | "empty";
 
@@ -26,22 +30,56 @@ function TeacherClassesContent() {
   const [filter, setFilter] = useState<ClassFilter>("all");
   const [showCreate, setShowCreate] = useState(false);
   const [message, setMessage] = useState("");
+  const [students, setStudents] = useState<AppUser[]>([]);
+  const [recordCountByUsername, setRecordCountByUsername] = useState<
+    Record<string, number>
+  >({});
+  const [loading, setLoading] = useState(true);
 
-  const loadData = (current: SessionUser) => {
-    setClasses(getTeacherClasses(current.username));
+  const loadData = async (current: SessionUser) => {
+    const [nextClasses, nextStudents] = await Promise.all([
+      getTeacherClasses(current.username),
+      getTeacherStudents(current.username),
+    ]);
+    const recordLists = await Promise.all(
+      nextStudents.map((student) => getUserRecords(student.username))
+    );
+    const counts = Object.fromEntries(
+      nextStudents.map((student, index) => [
+        student.username,
+        recordLists[index].length,
+      ])
+    );
+
+    setClasses(nextClasses);
+    setStudents(nextStudents);
+    setRecordCountByUsername(counts);
   };
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current) return;
-    setSession(current);
-    loadData(current);
-  }, []);
+    let cancelled = false;
 
-  const students = useMemo(
-    () => (session ? getTeacherStudents(session.username) : []),
-    [session]
-  );
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) return;
+      setSession(current);
+
+      try {
+        await bootstrapPortalFromLocal();
+        await loadData(current);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredClasses = useMemo(() => {
     const query = keyword.trim().toLowerCase();
@@ -58,34 +96,32 @@ function TeacherClassesContent() {
     });
   }, [classes, filter, keyword, students]);
 
-  if (!session) {
+  if (!session || loading) {
     return null;
   }
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    const result = createTeacherClass(session.username, className);
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+    try {
+      const result = await createTeacherClass(session.username, className);
+      setClassName("");
+      setShowCreate(false);
+      setMessage(`已创建班级：${result.name}`);
+      await loadData(session);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "创建班级失败");
     }
-
-    setClassName("");
-    setShowCreate(false);
-    setMessage(`已创建班级：${result.data.name}`);
-    loadData(session);
   };
 
-  const handleDelete = (classId: string) => {
-    const result = deleteTeacherClass(session.username, classId);
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+  const handleDelete = async (classId: string) => {
+    try {
+      await deleteTeacherClass(session.username, classId);
+      setMessage("班级已删除");
+      await loadData(session);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "删除班级失败");
     }
-
-    setMessage("班级已删除");
-    loadData(session);
   };
 
   return (
@@ -193,7 +229,7 @@ function TeacherClassesContent() {
             const theme = getClassCoverTheme(item.name, index);
             const classStudents = students.filter((student) => student.classId === item.id);
             const recordCount = classStudents.reduce(
-              (sum, student) => sum + getUserRecords(student.username).length,
+              (sum, student) => sum + (recordCountByUsername[student.username] || 0),
               0
             );
 

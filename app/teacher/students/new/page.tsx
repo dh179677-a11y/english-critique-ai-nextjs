@@ -5,15 +5,18 @@ import React, { useEffect, useState } from "react";
 import AuthGate from "@/components/AuthGate";
 import TeacherShell from "@/components/teacher/TeacherShell";
 import {
-  createStudentAccount,
   getSessionProfile,
-  getTeacherClasses,
   type CreateStudentInput,
   type ExpiryPreset,
   type SessionUser,
   type StudentGender,
   type TeacherClass,
 } from "@/lib/clientAuth";
+import {
+  bootstrapPortalFromLocal,
+  createStudentAccount,
+  getTeacherClasses,
+} from "@/lib/portalClient";
 
 const expiryOptions: Array<{ value: ExpiryPreset; label: string }> = [
   { value: "unlimited", label: "无限期" },
@@ -69,15 +72,37 @@ function AddStudentContent() {
     username: string;
     password: string;
   } | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const current = getSessionProfile();
-    if (!current) return;
-    setSession(current);
-    setClasses(getTeacherClasses(current.username));
+    let cancelled = false;
+
+    const run = async () => {
+      const current = getSessionProfile();
+      if (!current) return;
+      setSession(current);
+
+      try {
+        await bootstrapPortalFromLocal();
+        const nextClasses = await getTeacherClasses(current.username);
+        if (!cancelled) {
+          setClasses(nextClasses);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  if (!session) {
+  if (!session || loading) {
     return null;
   }
 
@@ -92,30 +117,29 @@ function AddStudentContent() {
     setForm(initialForm);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage("");
 
-    const result = createStudentAccount(session.username, form);
+    try {
+      const result = await createStudentAccount(session.username, form);
 
-    if (!result.ok) {
-      setMessage(result.message);
-      return;
+      setCreatedAccount({
+        displayName: result.displayName,
+        username: result.username,
+        password: result.password,
+      });
+
+      if (submitMode === "continue") {
+        setMessage(`已创建学员 ${result.displayName}，可继续添加下一位`);
+        resetForm();
+        return;
+      }
+
+      setMessage("学员账号已创建");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "创建学员失败");
     }
-
-    setCreatedAccount({
-      displayName: result.data.displayName,
-      username: result.data.username,
-      password: result.data.password,
-    });
-
-    if (submitMode === "continue") {
-      setMessage(`已创建学员 ${result.data.displayName}，可继续添加下一位`);
-      resetForm();
-      return;
-    }
-
-    setMessage("学员账号已创建");
   };
 
   const openExpiryModal = () => {
