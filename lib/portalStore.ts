@@ -76,7 +76,11 @@ export async function readPortalStore(): Promise<PortalStoreData> {
     const normalizedRaw = JSON.stringify(normalized, null, 2);
 
     if (normalizedRaw !== raw) {
-      await fs.writeFile(STORE_FILE, normalizedRaw, "utf8");
+      try {
+        await fs.writeFile(STORE_FILE, normalizedRaw, "utf8");
+      } catch (error) {
+        console.error("Failed to persist normalized portal store:", error);
+      }
     }
 
     return normalized;
