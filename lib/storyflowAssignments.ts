@@ -35,6 +35,7 @@ export interface StoryflowAssignment {
 }
 
 const STORYFLOW_ASSIGNMENTS_KEY = "ep_storyflow_assignments_v1";
+const STORYFLOW_ASSIGNMENTS_CACHE_TTL_MS = 60_000;
 
 const isBrowser = () => typeof window !== "undefined";
 
@@ -148,6 +149,16 @@ export const normalizeAssignment = (value: unknown): StoryflowAssignment | null 
 
 let cachedAssignments: StoryflowAssignment[] = [];
 let persistQueue: Promise<void> = Promise.resolve();
+const hydratedStudentAssignmentsAt = new Map<string, number>();
+const hydratedAssignmentByIdAt = new Map<string, number>();
+const inFlightStudentAssignmentRequests = new Map<
+  string,
+  Promise<StoryflowAssignment[]>
+>();
+const inFlightAssignmentByIdRequests = new Map<
+  string,
+  Promise<StoryflowAssignment | null>
+>();
 
 const normalizeAssignments = (assignments: StoryflowAssignment[]) =>
   assignments
@@ -157,6 +168,22 @@ const normalizeAssignments = (assignments: StoryflowAssignment[]) =>
 
 const setAssignmentsCache = (assignments: StoryflowAssignment[]) => {
   cachedAssignments = normalizeAssignments(assignments);
+};
+
+const hasFreshStudentAssignments = (studentUsername: string) => {
+  const lastHydratedAt = hydratedStudentAssignmentsAt.get(studentUsername) || 0;
+  return (
+    Date.now() - lastHydratedAt < STORYFLOW_ASSIGNMENTS_CACHE_TTL_MS &&
+    cachedAssignments.some((item) => item.studentUsername === studentUsername)
+  );
+};
+
+const hasFreshAssignmentById = (assignmentId: string) => {
+  const lastHydratedAt = hydratedAssignmentByIdAt.get(assignmentId) || 0;
+  return (
+    Date.now() - lastHydratedAt < STORYFLOW_ASSIGNMENTS_CACHE_TTL_MS &&
+    cachedAssignments.some((item) => item.id === assignmentId)
+  );
 };
 
 const queuePersist = (task: () => Promise<void>) => {
@@ -184,28 +211,71 @@ export async function hydrateStudentStoryflowAssignments(studentUsername: string
   const normalized = studentUsername.trim();
   if (!normalized) return [];
 
-  await ensureStoryflowBootstrap();
-  const assignments = await fetchStudentStoryflowAssignments(normalized);
-  setAssignmentsCache([
-    ...cachedAssignments.filter((item) => item.studentUsername !== normalized),
-    ...assignments,
-  ]);
-  return assignments;
+  if (hasFreshStudentAssignments(normalized)) {
+    return getStudentStoryflowAssignments(normalized);
+  }
+
+  const inFlightRequest = inFlightStudentAssignmentRequests.get(normalized);
+  if (inFlightRequest) {
+    return inFlightRequest;
+  }
+
+  const request = ensureStoryflowBootstrap()
+    .then(() => fetchStudentStoryflowAssignments(normalized))
+    .then((assignments) => {
+      setAssignmentsCache([
+        ...cachedAssignments.filter((item) => item.studentUsername !== normalized),
+        ...assignments,
+      ]);
+      hydratedStudentAssignmentsAt.set(normalized, Date.now());
+      assignments.forEach((item) => {
+        hydratedAssignmentByIdAt.set(item.id, Date.now());
+      });
+      return assignments;
+    })
+    .finally(() => {
+      inFlightStudentAssignmentRequests.delete(normalized);
+    });
+
+  inFlightStudentAssignmentRequests.set(normalized, request);
+  return request;
 }
 
 export async function hydrateStoryflowAssignmentById(assignmentId: string) {
   const normalized = assignmentId.trim();
   if (!normalized) return null;
 
-  await ensureStoryflowBootstrap();
-  const assignment = await fetchStoryflowAssignmentById(normalized);
-  if (!assignment) return null;
+  if (hasFreshAssignmentById(normalized)) {
+    return getStoryflowAssignmentById(normalized);
+  }
 
-  setAssignmentsCache([
-    assignment,
-    ...cachedAssignments.filter((item) => item.id !== assignment.id),
-  ]);
-  return assignment;
+  const inFlightRequest = inFlightAssignmentByIdRequests.get(normalized);
+  if (inFlightRequest) {
+    return inFlightRequest;
+  }
+
+  const request = ensureStoryflowBootstrap()
+    .then(() => fetchStoryflowAssignmentById(normalized))
+    .then((assignment) => {
+      if (!assignment) {
+        hydratedAssignmentByIdAt.set(normalized, Date.now());
+        return null;
+      }
+
+      setAssignmentsCache([
+        assignment,
+        ...cachedAssignments.filter((item) => item.id !== assignment.id),
+      ]);
+      hydratedAssignmentByIdAt.set(normalized, Date.now());
+      hydratedStudentAssignmentsAt.set(assignment.studentUsername, Date.now());
+      return assignment;
+    })
+    .finally(() => {
+      inFlightAssignmentByIdRequests.delete(normalized);
+    });
+
+  inFlightAssignmentByIdRequests.set(normalized, request);
+  return request;
 }
 
 export const getTeacherStoryflowAssignments = (teacherUsername: string) => {

@@ -157,6 +157,7 @@ export interface StoryflowDocument {
 
 const STORYFLOW_KEY = "ep_storyflow_docs_v1";
 const STORYFLOW_FOLDER_KEY = "ep_storyflow_folders_v1";
+const STORYFLOW_DOCUMENT_CACHE_TTL_MS = 60_000;
 
 const isBrowser = () => typeof window !== "undefined";
 
@@ -643,6 +644,11 @@ export const normalizeStoryflowFolder = (
 let cachedDocuments: StoryflowDocument[] = [];
 let cachedFolders: StoryflowFolder[] = [];
 let persistQueue: Promise<void> = Promise.resolve();
+const hydratedAccessibleDocumentsAt = new Map<string, number>();
+const inFlightAccessibleDocumentRequests = new Map<
+  string,
+  Promise<StoryflowDocument[]>
+>();
 
 const normalizeDocuments = (documents: StoryflowDocument[]) =>
   documents
@@ -660,6 +666,14 @@ const setDocumentsCache = (documents: StoryflowDocument[]) => {
 
 const setFoldersCache = (folders: StoryflowFolder[]) => {
   cachedFolders = normalizeFolders(folders);
+};
+
+const hasFreshAccessibleDocuments = (teacherUsername: string) => {
+  const lastHydratedAt = hydratedAccessibleDocumentsAt.get(teacherUsername) || 0;
+  return (
+    Date.now() - lastHydratedAt < STORYFLOW_DOCUMENT_CACHE_TTL_MS &&
+    cachedDocuments.some((item) => item.teacherUsername === teacherUsername)
+  );
 };
 
 const queuePersist = (task: () => Promise<void>) => {
@@ -702,13 +716,31 @@ export const hydrateAccessibleTeacherStoryflowDocuments = async (
   const normalized = teacherUsername.trim();
   if (!normalized) return [];
 
-  await ensureStoryflowBootstrap();
-  const documents = await fetchAccessibleStoryflowDocuments(normalized);
-  setDocumentsCache([
-    ...cachedDocuments.filter((item) => item.teacherUsername !== normalized),
-    ...documents,
-  ]);
-  return documents;
+  if (hasFreshAccessibleDocuments(normalized)) {
+    return getTeacherStoryflowDocuments(normalized);
+  }
+
+  const inFlightRequest = inFlightAccessibleDocumentRequests.get(normalized);
+  if (inFlightRequest) {
+    return inFlightRequest;
+  }
+
+  const request = ensureStoryflowBootstrap()
+    .then(() => fetchAccessibleStoryflowDocuments(normalized))
+    .then((documents) => {
+      setDocumentsCache([
+        ...cachedDocuments.filter((item) => item.teacherUsername !== normalized),
+        ...documents,
+      ]);
+      hydratedAccessibleDocumentsAt.set(normalized, Date.now());
+      return documents;
+    })
+    .finally(() => {
+      inFlightAccessibleDocumentRequests.delete(normalized);
+    });
+
+  inFlightAccessibleDocumentRequests.set(normalized, request);
+  return request;
 };
 
 export const hydrateTeacherStoryflowFolders = async (teacherUsername: string) => {

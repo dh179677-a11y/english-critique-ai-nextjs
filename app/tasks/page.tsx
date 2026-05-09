@@ -3,7 +3,7 @@
 import Link from "next/link";
 import React, { useEffect, useMemo, useState } from "react";
 import AuthGate from "@/components/AuthGate";
-import { getSessionProfile, type SessionUser } from "@/lib/clientAuth";
+import { useSessionProfile } from "@/lib/clientAuth";
 import {
   getStudentStoryflowAssignments,
   hydrateStudentStoryflowAssignments,
@@ -38,31 +38,33 @@ const fetchStoryflowUrls = async (objectKeys: string[]) => {
 };
 
 function StudentTasksContent() {
-  const [session, setSession] = useState<SessionUser | null>(null);
+  const session = useSessionProfile();
   const [tasks, setTasks] = useState<ReturnType<typeof getStudentStoryflowAssignments>>([]);
   const [coverUrls, setCoverUrls] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    setSession(getSessionProfile());
-  }, []);
-
-  useEffect(() => {
     if (!session) return;
     let disposed = false;
+    const refreshTasks = () => {
+      if (!disposed) {
+        setTasks([...getStudentStoryflowAssignments(session.username)]);
+      }
+    };
+
+    refreshTasks();
 
     void hydrateStudentStoryflowAssignments(session.username)
-      .then(async (assignments) => {
-        await hydrateAccessibleStoryflowDocumentsForTeachers(
+      .then((assignments) => {
+        refreshTasks();
+        return hydrateAccessibleStoryflowDocumentsForTeachers(
           assignments.map((item) => item.teacherUsername)
         );
-        if (!disposed) {
-          setTasks(getStudentStoryflowAssignments(session.username));
-        }
+      })
+      .then(() => {
+        refreshTasks();
       })
       .catch(() => {
-        if (!disposed) {
-          setTasks(getStudentStoryflowAssignments(session.username));
-        }
+        refreshTasks();
       });
 
     return () => {

@@ -27,6 +27,10 @@ const EMPTY_STORE: StoryflowStoreData = {
   assignments: [],
 };
 
+let cachedStore: StoryflowStoreData | null = null;
+let cachedStoreMtimeMs = 0;
+let readStorePromise: Promise<StoryflowStoreData> | null = null;
+
 function cloneEmptyStore(): StoryflowStoreData {
   return {
     documents: [],
@@ -66,29 +70,54 @@ async function ensureStoreFile() {
 export async function readStoryflowStore(): Promise<StoryflowStoreData> {
   await ensureStoreFile();
 
-  try {
-    const raw = await fs.readFile(STORE_FILE, "utf8");
-    const parsed = JSON.parse(raw) as Partial<StoryflowStoreData>;
-    const normalized = normalizeStore(parsed);
-    const normalizedRaw = JSON.stringify(normalized, null, 2);
-
-    if (normalizedRaw !== raw) {
-      try {
-        await fs.writeFile(STORE_FILE, normalizedRaw, "utf8");
-      } catch (error) {
-        console.error("Failed to persist normalized storyflow store:", error);
-      }
-    }
-
-    return normalized;
-  } catch {
-    return cloneEmptyStore();
+  const fileStat = await fs.stat(STORE_FILE);
+  if (cachedStore && cachedStoreMtimeMs === fileStat.mtimeMs) {
+    return cachedStore;
   }
+
+  if (readStorePromise) {
+    return readStorePromise;
+  }
+
+  readStorePromise = (async () => {
+    try {
+      const raw = await fs.readFile(STORE_FILE, "utf8");
+      const parsed = JSON.parse(raw) as Partial<StoryflowStoreData>;
+      const normalized = normalizeStore(parsed);
+      const normalizedRaw = JSON.stringify(normalized, null, 2);
+      let nextMtimeMs = fileStat.mtimeMs;
+
+      if (normalizedRaw !== raw) {
+        try {
+          await fs.writeFile(STORE_FILE, normalizedRaw, "utf8");
+          nextMtimeMs = (await fs.stat(STORE_FILE)).mtimeMs;
+        } catch (error) {
+          console.error("Failed to persist normalized storyflow store:", error);
+        }
+      }
+
+      cachedStore = normalized;
+      cachedStoreMtimeMs = nextMtimeMs;
+      return normalized;
+    } catch {
+      const emptyStore = cloneEmptyStore();
+      cachedStore = emptyStore;
+      cachedStoreMtimeMs = fileStat.mtimeMs;
+      return emptyStore;
+    } finally {
+      readStorePromise = null;
+    }
+  })();
+
+  return readStorePromise;
 }
 
 export async function writeStoryflowStore(data: StoryflowStoreData) {
   await ensureStoreFile();
-  await fs.writeFile(STORE_FILE, JSON.stringify(normalizeStore(data), null, 2), "utf8");
+  const normalized = normalizeStore(data);
+  await fs.writeFile(STORE_FILE, JSON.stringify(normalized, null, 2), "utf8");
+  cachedStore = normalized;
+  cachedStoreMtimeMs = (await fs.stat(STORE_FILE)).mtimeMs;
 }
 
 export async function updateStoryflowStore(

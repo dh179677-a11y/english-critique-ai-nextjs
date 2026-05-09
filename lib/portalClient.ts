@@ -47,6 +47,11 @@ const USERS_KEY = "ep_users_v2";
 const CLASSES_KEY = "ep_teacher_classes_v1";
 const RECORDS_KEY = "ep_analysis_records";
 const BOOTSTRAP_KEY = "ep_portal_bootstrapped_v1";
+const SESSION_CACHE_TTL_MS = 10_000;
+
+let cachedSession: SessionUser | null = null;
+let cachedSessionExpiresAt = 0;
+let sessionPromise: Promise<SessionUser | null> | null = null;
 
 async function portalRequest<T>(
   action: PortalAction,
@@ -181,13 +186,34 @@ export async function hasTeacherAccount() {
 }
 
 export async function getServerSession() {
-  return sessionRequest<SessionUser | null>("GET");
+  if (sessionPromise) {
+    return sessionPromise;
+  }
+
+  if (Date.now() < cachedSessionExpiresAt) {
+    return cachedSession;
+  }
+
+  sessionPromise = sessionRequest<SessionUser | null>("GET")
+    .then((session) => {
+      cachedSession = session;
+      cachedSessionExpiresAt = Date.now() + SESSION_CACHE_TTL_MS;
+      return session;
+    })
+    .finally(() => {
+      sessionPromise = null;
+    });
+
+  return sessionPromise;
 }
 
 export async function logoutUser() {
   try {
     await sessionRequest("DELETE");
   } finally {
+    cachedSession = null;
+    cachedSessionExpiresAt = 0;
+    sessionPromise = null;
     removeJson(USERS_KEY);
     removeJson(CLASSES_KEY);
     removeJson(RECORDS_KEY);
@@ -199,7 +225,15 @@ export async function loginUser(input: {
   username: string;
   password: string;
 }) {
-  return portalRequest<AppUser>("loginUser", input);
+  const user = await portalRequest<AppUser>("loginUser", input);
+  cachedSession = {
+    username: user.username,
+    role: user.role,
+    displayName: user.displayName,
+    teacherUsername: user.teacherUsername,
+  };
+  cachedSessionExpiresAt = Date.now() + SESSION_CACHE_TTL_MS;
+  return user;
 }
 
 export async function registerTeacher(input: {
@@ -208,7 +242,15 @@ export async function registerTeacher(input: {
   displayName: string;
   inviteCode: string;
 }) {
-  return portalRequest<AppUser>("registerTeacher", input);
+  const user = await portalRequest<AppUser>("registerTeacher", input);
+  cachedSession = {
+    username: user.username,
+    role: user.role,
+    displayName: user.displayName,
+    teacherUsername: user.teacherUsername,
+  };
+  cachedSessionExpiresAt = Date.now() + SESSION_CACHE_TTL_MS;
+  return user;
 }
 
 export async function getTeacherClasses(teacherUsername: string) {

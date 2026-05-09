@@ -6,6 +6,7 @@ import {
   clearSessionUser,
   getHomePathForRole,
   setSessionUser,
+  useSessionProfile,
   type UserRole,
 } from "@/lib/clientAuth";
 import { getServerSession } from "@/lib/portalClient";
@@ -16,9 +17,24 @@ interface AuthGateProps {
 }
 
 const AuthGate: React.FC<AuthGateProps> = ({ children, allowedRoles }) => {
-  const [ready, setReady] = useState(false);
+  const cachedSession = useSessionProfile();
+  const allowedRoleKey = allowedRoles?.slice().sort().join("|") || "";
+  const resolvedAllowedRoles = React.useMemo(
+    () => (allowedRoleKey ? (allowedRoleKey.split("|") as UserRole[]) : []),
+    [allowedRoleKey]
+  );
+  const hasCachedAccess =
+    !!cachedSession &&
+    (!resolvedAllowedRoles.length || resolvedAllowedRoles.includes(cachedSession.role));
+  const [ready, setReady] = useState(hasCachedAccess);
   const router = useRouter();
   const pathname = usePathname();
+
+  useEffect(() => {
+    if (hasCachedAccess) {
+      setReady(true);
+    }
+  }, [hasCachedAccess]);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,7 +53,10 @@ const AuthGate: React.FC<AuthGateProps> = ({ children, allowedRoles }) => {
 
         setSessionUser(currentUser);
 
-        if (allowedRoles?.length && !allowedRoles.includes(currentUser.role)) {
+        if (
+          resolvedAllowedRoles.length &&
+          !resolvedAllowedRoles.includes(currentUser.role)
+        ) {
           router.replace(getHomePathForRole(currentUser.role));
           return;
         }
@@ -58,7 +77,7 @@ const AuthGate: React.FC<AuthGateProps> = ({ children, allowedRoles }) => {
     return () => {
       cancelled = true;
     };
-  }, [allowedRoles, pathname, router]);
+  }, [allowedRoleKey, pathname, resolvedAllowedRoles, router]);
 
   if (!ready) {
     return (

@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import { deleteUserRecords } from "@/lib/clientRecords";
 
 export type UserRole = "teacher" | "student";
@@ -82,6 +83,7 @@ const SESSION_KEY = "ep_session_v2";
 const CLASSES_KEY = "ep_teacher_classes_v1";
 const LEGACY_USERS_KEY = "ep_users";
 const DEFAULT_INVITE_CODE = "VIP888";
+const SESSION_CHANGE_EVENT = "ep:session-change";
 
 const isBrowser = () => typeof window !== "undefined";
 
@@ -105,6 +107,11 @@ const readJson = <T,>(key: string, fallback: T): T => {
 const writeJson = (key: string, value: unknown) => {
   if (!isBrowser()) return;
   window.localStorage.setItem(key, JSON.stringify(value));
+};
+
+const emitSessionChange = () => {
+  if (!isBrowser()) return;
+  window.dispatchEvent(new Event(SESSION_CHANGE_EVENT));
 };
 
 const migrateLegacyUsers = () => {
@@ -229,6 +236,27 @@ export const getSessionUser = (): string | null => {
   return getSessionProfile()?.username || null;
 };
 
+const subscribeSessionProfile = (listener: () => void) => {
+  if (!isBrowser()) {
+    return () => undefined;
+  }
+
+  const handleChange = () => {
+    listener();
+  };
+
+  window.addEventListener("storage", handleChange);
+  window.addEventListener(SESSION_CHANGE_EVENT, handleChange);
+
+  return () => {
+    window.removeEventListener("storage", handleChange);
+    window.removeEventListener(SESSION_CHANGE_EVENT, handleChange);
+  };
+};
+
+export const useSessionProfile = () =>
+  useSyncExternalStore(subscribeSessionProfile, getSessionProfile, () => null);
+
 export const getHomePathForRole = (role: UserRole): string =>
   role === "teacher" ? "/teacher" : "/";
 
@@ -239,11 +267,13 @@ export const setSessionUser = (user: AppUser | SessionUser) => {
     displayName: user.displayName,
     teacherUsername: "teacherUsername" in user ? user.teacherUsername : undefined,
   });
+  emitSessionChange();
 };
 
 export const clearSessionUser = () => {
   if (!isBrowser()) return;
   window.localStorage.removeItem(SESSION_KEY);
+  emitSessionChange();
 };
 
 export const hasTeacherAccount = (): boolean =>

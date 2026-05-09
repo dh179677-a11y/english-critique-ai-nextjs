@@ -751,9 +751,16 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   taskMode: forcedTaskMode,
 }) => {
   const router = useRouter();
-  const [assignment, setAssignment] = useState<StoryflowAssignment | null>(null);
+  const [assignment, setAssignment] = useState<StoryflowAssignment | null>(() => {
+    const cachedAssignment = getStoryflowAssignmentById(assignmentId);
+    if (!cachedAssignment || cachedAssignment.studentUsername !== session.username) {
+      return null;
+    }
+    return cachedAssignment;
+  });
   const [error, setError] = useState<string | null>(null);
   const [resolvedUrls, setResolvedUrls] = useState<Record<string, string>>({});
+  const [documentRefreshKey, setDocumentRefreshKey] = useState(0);
   const [pageIndex, setPageIndex] = useState(0);
   const [hintStage, setHintStage] = useState<0 | 1 | 2>(0);
   const [taskMode, setTaskMode] = useState<TaskMode>("mindmap");
@@ -781,9 +788,22 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
   useEffect(() => {
     let disposed = false;
+    const refreshAccessibleDocuments = async (teacherUsername: string) => {
+      await hydrateAccessibleTeacherStoryflowDocuments(teacherUsername);
+      if (!disposed) {
+        setDocumentRefreshKey((value) => value + 1);
+      }
+    };
+
+    const cachedAssignment = getStoryflowAssignmentById(assignmentId);
+    if (cachedAssignment?.studentUsername === session.username) {
+      setAssignment(cachedAssignment);
+      setError(null);
+      void refreshAccessibleDocuments(cachedAssignment.teacherUsername).catch(() => undefined);
+    }
 
     void hydrateStoryflowAssignmentById(assignmentId)
-      .then(async (hydratedAssignment) => {
+      .then((hydratedAssignment) => {
         const currentAssignment =
           hydratedAssignment || getStoryflowAssignmentById(assignmentId);
         if (!currentAssignment || currentAssignment.studentUsername !== session.username) {
@@ -794,11 +814,15 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           return;
         }
 
-        await hydrateAccessibleTeacherStoryflowDocuments(currentAssignment.teacherUsername);
         if (!disposed) {
           setAssignment(currentAssignment);
           setError(null);
         }
+        void refreshAccessibleDocuments(currentAssignment.teacherUsername).catch(() => {
+          if (!disposed) {
+            setDocumentRefreshKey((value) => value + 1);
+          }
+        });
       })
       .catch(() => {
         if (!disposed) {
@@ -819,7 +843,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         (item) => item.id === assignment.documentId
       ) || null
     );
-  }, [assignment]);
+  }, [assignment, documentRefreshKey]);
 
   const pages = useMemo(() => {
     if (!document) return [];
