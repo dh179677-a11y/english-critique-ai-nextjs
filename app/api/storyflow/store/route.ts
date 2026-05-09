@@ -20,6 +20,7 @@ import {
 type StoryflowAction =
   | "bootstrap"
   | "getTeacherLibrary"
+  | "getAccessibleDocuments"
   | "getTeacherAssignments"
   | "getStudentAssignments"
   | "getAssignmentById"
@@ -197,6 +198,46 @@ async function getTeacherLibrary(request: NextRequest, payload: Record<string, u
     documents: getTeacherDocuments(store, teacherUsername),
     folders: getTeacherFolders(store, teacherUsername),
   });
+}
+
+async function getAccessibleDocumentsAction(
+  request: NextRequest,
+  payload: Record<string, unknown> | undefined
+) {
+  const session = getSessionFromRequest(request);
+  if (!session) {
+    return fail("未登录", 401);
+  }
+
+  const teacherUsername = normalizeText(payload?.teacherUsername);
+  if (!teacherUsername) {
+    return fail("老师账号不能为空");
+  }
+
+  const store = await readStoryflowStore();
+
+  if (session.role === "teacher") {
+    if (teacherUsername !== session.username) {
+      return fail("无权访问该老师资料", 403);
+    }
+    return ok(getTeacherDocuments(store, teacherUsername));
+  }
+
+  const assignedDocumentIds = new Set(
+    store.assignments
+      .filter(
+        (item) =>
+          item.studentUsername === session.username &&
+          item.teacherUsername === teacherUsername
+      )
+      .map((item) => item.documentId)
+  );
+
+  return ok(
+    getTeacherDocuments(store, teacherUsername).filter((item) =>
+      assignedDocumentIds.has(item.id)
+    )
+  );
 }
 
 async function getTeacherAssignmentsAction(
@@ -596,6 +637,8 @@ export async function POST(request: NextRequest) {
       return bootstrapStoryflow(request, body.payload);
     case "getTeacherLibrary":
       return getTeacherLibrary(request, body.payload);
+    case "getAccessibleDocuments":
+      return getAccessibleDocumentsAction(request, body.payload);
     case "getTeacherAssignments":
       return getTeacherAssignmentsAction(request, body.payload);
     case "getStudentAssignments":

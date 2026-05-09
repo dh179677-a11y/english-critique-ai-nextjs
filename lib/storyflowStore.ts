@@ -1,5 +1,6 @@
 import {
   ensureStoryflowBootstrap,
+  fetchAccessibleStoryflowDocuments,
   fetchTeacherStoryflowLibrary,
   persistStoryflowDocument,
   persistStoryflowDocumentOrder,
@@ -695,6 +696,21 @@ export const hydrateTeacherStoryflowDocuments = async (teacherUsername: string) 
   return documents;
 };
 
+export const hydrateAccessibleTeacherStoryflowDocuments = async (
+  teacherUsername: string
+) => {
+  const normalized = teacherUsername.trim();
+  if (!normalized) return [];
+
+  await ensureStoryflowBootstrap();
+  const documents = await fetchAccessibleStoryflowDocuments(normalized);
+  setDocumentsCache([
+    ...cachedDocuments.filter((item) => item.teacherUsername !== normalized),
+    ...documents,
+  ]);
+  return documents;
+};
+
 export const hydrateTeacherStoryflowFolders = async (teacherUsername: string) => {
   const { folders } = await hydrateTeacherStoryflowLibrary(teacherUsername);
   return folders;
@@ -703,6 +719,20 @@ export const hydrateTeacherStoryflowFolders = async (teacherUsername: string) =>
 export const hydrateStoryflowDocumentsForTeachers = async (teacherUsernames: string[]) => {
   const normalized = Array.from(new Set(teacherUsernames.map((item) => item.trim()).filter(Boolean)));
   await Promise.all(normalized.map((teacherUsername) => hydrateTeacherStoryflowDocuments(teacherUsername)));
+  return cachedDocuments;
+};
+
+export const hydrateAccessibleStoryflowDocumentsForTeachers = async (
+  teacherUsernames: string[]
+) => {
+  const normalized = Array.from(
+    new Set(teacherUsernames.map((item) => item.trim()).filter(Boolean))
+  );
+  await Promise.all(
+    normalized.map((teacherUsername) =>
+      hydrateAccessibleTeacherStoryflowDocuments(teacherUsername)
+    )
+  );
   return cachedDocuments;
 };
 

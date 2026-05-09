@@ -8,7 +8,7 @@ import type { SessionUser } from "@/lib/clientAuth";
 import {
   buildDefaultStoryflowPerformanceConfig,
   getTeacherStoryflowDocuments,
-  hydrateTeacherStoryflowDocuments,
+  hydrateAccessibleTeacherStoryflowDocuments,
   type StoryflowAnalysis,
   type StoryflowCustomView,
   type StoryflowPageAudioSegmentSlot,
@@ -794,7 +794,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           return;
         }
 
-        await hydrateTeacherStoryflowDocuments(currentAssignment.teacherUsername);
+        await hydrateAccessibleTeacherStoryflowDocuments(currentAssignment.teacherUsername);
         if (!disposed) {
           setAssignment(currentAssignment);
           setError(null);

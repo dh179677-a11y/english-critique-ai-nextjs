@@ -9,8 +9,8 @@ import {
   hydrateStudentStoryflowAssignments,
 } from "@/lib/storyflowAssignments";
 import {
+  hydrateAccessibleStoryflowDocumentsForTeachers,
   getTeacherStoryflowDocuments,
-  hydrateStoryflowDocumentsForTeachers,
 } from "@/lib/storyflowStore";
 
 type TaskCard = ReturnType<typeof getStudentStoryflowAssignments>[number] & {
@@ -52,7 +52,7 @@ function StudentTasksContent() {
 
     void hydrateStudentStoryflowAssignments(session.username)
       .then(async (assignments) => {
-        await hydrateStoryflowDocumentsForTeachers(
+        await hydrateAccessibleStoryflowDocumentsForTeachers(
           assignments.map((item) => item.teacherUsername)
         );
         if (!disposed) {

@@ -4,6 +4,7 @@ import type { StoryflowDocument, StoryflowFolder } from "@/lib/storyflowStore";
 type StoryflowAction =
   | "bootstrap"
   | "getTeacherLibrary"
+  | "getAccessibleDocuments"
   | "getTeacherAssignments"
   | "getStudentAssignments"
   | "getAssignmentById"
@@ -109,6 +110,12 @@ export async function fetchTeacherStoryflowLibrary(teacherUsername: string) {
     documents: StoryflowDocument[];
     folders: StoryflowFolder[];
   }>("getTeacherLibrary", {
+    teacherUsername,
+  });
+}
+
+export async function fetchAccessibleStoryflowDocuments(teacherUsername: string) {
+  return storyflowRequest<StoryflowDocument[]>("getAccessibleDocuments", {
     teacherUsername,
   });
 }
