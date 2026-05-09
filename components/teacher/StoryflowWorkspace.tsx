@@ -3927,26 +3927,38 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     setIsMetaEditorOpen(false);
   };
 
-  const handlePublishStoryflow = () => {
+  const handlePublishStoryflow = async () => {
     if (!activeDocument) return;
     if (!selectedPublishStudents.length) {
       setError("请至少选择 1 名学生。");
       return;
     }
 
-    publishStoryflowAssignments(
-      session.username,
-      session.displayName || session.username,
-      activeDocument,
-      selectedPublishStudents.map((student) => ({
-        username: student.username,
-        displayName: student.displayName,
-      }))
-    );
-    setIsPublishOpen(false);
-    setSelectedPublishStudentIds([]);
-    setError(null);
-    setNotice(`已将《${activeDocument.analysis.title || activeDocument.sourceName}》发布给 ${selectedPublishStudents.length} 名学生。`);
+    try {
+      setError(null);
+      setNotice("正在发布任务给学生...");
+
+      await publishStoryflowAssignments(
+        session.username,
+        session.displayName || session.username,
+        activeDocument,
+        selectedPublishStudents.map((student) => ({
+          username: student.username,
+          displayName: student.displayName,
+        }))
+      );
+
+      setIsPublishOpen(false);
+      setSelectedPublishStudentIds([]);
+      setNotice(
+        `已将《${activeDocument.analysis.title || activeDocument.sourceName}》发布给 ${selectedPublishStudents.length} 名学生。`
+      );
+    } catch (publishError) {
+      setNotice(null);
+      setError(
+        publishError instanceof Error ? publishError.message : "发布任务失败，请重试。"
+      );
+    }
   };
 
   return (

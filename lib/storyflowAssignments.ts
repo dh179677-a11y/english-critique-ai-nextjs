@@ -160,13 +160,11 @@ const setAssignmentsCache = (assignments: StoryflowAssignment[]) => {
 };
 
 const queuePersist = (task: () => Promise<void>) => {
-  persistQueue = persistQueue
-    .catch(() => undefined)
-    .then(task)
-    .catch((error) => {
-      console.error("Failed to persist storyflow assignments:", error);
-    });
-  return persistQueue;
+  const run = persistQueue.catch(() => undefined).then(task);
+  persistQueue = run.catch((error) => {
+    console.error("Failed to persist storyflow assignments:", error);
+  });
+  return run;
 };
 
 export async function hydrateTeacherStoryflowAssignments(teacherUsername: string) {
@@ -228,7 +226,7 @@ export const getStoryflowAssignmentById = (assignmentId: string) => {
   return cachedAssignments.find((item) => item.id === normalized) || null;
 };
 
-export const publishStoryflowAssignments = (
+export const publishStoryflowAssignments = async (
   teacherUsername: string,
   teacherDisplayName: string,
   document: StoryflowDocument,
@@ -266,7 +264,7 @@ export const publishStoryflowAssignments = (
   }));
 
   setAssignmentsCache([...created, ...current]);
-  void queuePersist(async () => {
+  await queuePersist(async () => {
     await persistPublishedStoryflowAssignments(created);
   });
   return created;
