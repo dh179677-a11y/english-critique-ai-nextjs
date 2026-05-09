@@ -2133,6 +2133,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   };
 
   useEffect(() => {
+    refreshDocuments();
     let disposed = false;
 
     void Promise.all([
@@ -3555,14 +3556,12 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         });
       }
 
-      setPendingAudioAssets((current) =>
-        sortAudioAssets([...current, ...nextAudioAssets])
-      );
+      setPendingAudioAssets(sortAudioAssets(nextAudioAssets));
       if (nextAudioAssets.length) {
         setNotice(
           nextAudioAssets.length === 1
-            ? "已添加 1 条音频，分析后会自动匹配到页面。"
-            : `已添加 ${nextAudioAssets.length} 条音频，分析后会自动匹配到页面。`
+            ? "已选择 1 条音频，将替换之前待上传的音频。"
+            : `已选择 ${nextAudioAssets.length} 条音频，将替换之前待上传的音频。`
         );
       }
     } catch (uploadError) {
@@ -3801,35 +3800,32 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       );
 
       applyDocumentUpdate(activeDocument.id, (document) => {
-        const existingTracks = document.shadowAudio?.tracks || [];
-        const nextTracks = [...existingTracks, ...uploadedAudioTracks];
+        const existingTrackKeys = new Set(
+          (document.shadowAudio?.tracks || []).map((track) => track.objectKey)
+        );
         const nextSourceAssets = [
-          ...(document.sourceAssets || []),
+          ...(document.sourceAssets || []).filter(
+            (asset) => !existingTrackKeys.has(asset.objectKey)
+          ),
           ...uploadedAudioTracks.map((audio) => ({
             fileName: audio.fileName,
             mimeType: audio.mimeType,
             objectKey: audio.objectKey,
           })),
         ];
-        const pageCount =
-          document.pageObjectKeys?.length ||
-          document.analysis.shadowPageTexts?.length ||
-          document.pageCount ||
-          0;
-        const shadowTexts = buildResolvedShadowTexts(document.analysis, pageCount);
 
         return {
           ...document,
           sourceAssets: nextSourceAssets,
           shadowAudio: {
-            tracks: nextTracks,
+            tracks: uploadedAudioTracks,
             pageSegments: [],
           },
         };
       });
 
       setPendingAudioAssets([]);
-      setNotice("音频已添加到当前资料。需要时再点击“识别音频”进行匹配。");
+      setNotice("音频已替换到当前资料。需要时再点击“识别音频”进行匹配。");
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "音频上传失败");
       setNotice(null);

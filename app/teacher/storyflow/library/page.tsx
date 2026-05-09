@@ -4,7 +4,8 @@ import Link from "next/link";
 import React, { useEffect, useMemo, useState } from "react";
 import AuthGate from "@/components/AuthGate";
 import TeacherShell from "@/components/teacher/TeacherShell";
-import { getSessionProfile, type SessionUser } from "@/lib/clientAuth";
+import type { SessionUser } from "@/lib/clientAuth";
+import { getServerSession } from "@/lib/portalClient";
 import {
   createTeacherStoryflowFolder,
   deleteTeacherStoryflowFolder,
@@ -71,7 +72,19 @@ function TeacherStoryflowLibraryContent() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    setSession(getSessionProfile());
+    let disposed = false;
+
+    void getServerSession()
+      .then((current) => {
+        if (!disposed && current?.role === "teacher") {
+          setSession(current);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   const refreshData = (teacherUsername: string) => {
@@ -81,6 +94,7 @@ function TeacherStoryflowLibraryContent() {
 
   useEffect(() => {
     if (!session) return;
+    refreshData(session.username);
     let disposed = false;
 
     void hydrateTeacherStoryflowLibrary(session.username)

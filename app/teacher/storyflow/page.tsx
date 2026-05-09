@@ -6,7 +6,8 @@ import { useSearchParams } from "next/navigation";
 import AuthGate from "@/components/AuthGate";
 import StoryflowWorkspace from "@/components/teacher/StoryflowWorkspace";
 import TeacherShell from "@/components/teacher/TeacherShell";
-import { getSessionProfile, type SessionUser } from "@/lib/clientAuth";
+import type { SessionUser } from "@/lib/clientAuth";
+import { getServerSession } from "@/lib/portalClient";
 
 function TeacherStoryflowContent() {
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -14,7 +15,19 @@ function TeacherStoryflowContent() {
   const initialDocumentId = searchParams.get("doc");
 
   useEffect(() => {
-    setSession(getSessionProfile());
+    let disposed = false;
+
+    void getServerSession()
+      .then((current) => {
+        if (!disposed && current?.role === "teacher") {
+          setSession(current);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   if (!session) {
