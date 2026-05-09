@@ -10,6 +10,7 @@ import {
   deleteTeacherStoryflowFolder,
   getTeacherStoryflowDocuments,
   getTeacherStoryflowFolders,
+  hydrateTeacherStoryflowLibrary,
   reorderTeacherStoryflowDocuments,
   reorderTeacherStoryflowFolders,
   updateTeacherStoryflowDocument,
@@ -80,7 +81,23 @@ function TeacherStoryflowLibraryContent() {
 
   useEffect(() => {
     if (!session) return;
-    refreshData(session.username);
+    let disposed = false;
+
+    void hydrateTeacherStoryflowLibrary(session.username)
+      .then(() => {
+        if (!disposed) {
+          refreshData(session.username);
+        }
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setError(error instanceof Error ? error.message : "资料库加载失败");
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, [session]);
 
   useEffect(() => {

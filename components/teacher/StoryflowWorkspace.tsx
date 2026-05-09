@@ -18,6 +18,7 @@ import {
 } from "@/lib/clientAuth";
 import {
   getTeacherStoryflowAssignments,
+  hydrateTeacherStoryflowAssignments,
   publishStoryflowAssignments,
   type StoryflowAssignment,
   updateStoryflowAssignment,
@@ -27,6 +28,7 @@ import {
   buildDefaultStoryflowPerformanceConfig,
   deleteTeacherStoryflowDocument,
   getTeacherStoryflowDocuments,
+  hydrateTeacherStoryflowDocuments,
   saveTeacherStoryflowDocument,
   updateTeacherStoryflowDocument,
   type StoryflowAnalysis,
@@ -2131,7 +2133,26 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   };
 
   useEffect(() => {
-    refreshDocuments();
+    let disposed = false;
+
+    void Promise.all([
+      hydrateTeacherStoryflowDocuments(session.username),
+      hydrateTeacherStoryflowAssignments(session.username),
+    ])
+      .then(() => {
+        if (!disposed) {
+          refreshDocuments();
+        }
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setError(error instanceof Error ? error.message : "资料加载失败，请刷新重试。");
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, [session.username, initialDocumentId]);
 
   const pendingImages = useMemo(

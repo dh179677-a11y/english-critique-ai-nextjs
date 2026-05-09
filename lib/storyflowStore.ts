@@ -1,3 +1,15 @@
+import {
+  ensureStoryflowBootstrap,
+  fetchTeacherStoryflowLibrary,
+  persistStoryflowDocument,
+  persistStoryflowDocumentOrder,
+  persistStoryflowFolder,
+  persistStoryflowFolderOrder,
+  removeStoryflowDocument,
+  removeStoryflowFolder,
+  replaceStoryflowDocument,
+  replaceStoryflowFolder,
+} from "@/lib/storyflowPortalClient";
 import type { AnalysisResult } from "@/types";
 
 export interface StoryflowMindMap {
@@ -490,7 +502,7 @@ const normalizeStoryflowPerformanceConfig = (
   };
 };
 
-const normalizeStoryflowDocument = (
+export const normalizeStoryflowDocument = (
   value: unknown,
   fallbackOrder = 0
 ): StoryflowDocument | null => {
@@ -601,7 +613,7 @@ const normalizeStoryflowDocument = (
   };
 };
 
-const normalizeStoryflowFolder = (
+export const normalizeStoryflowFolder = (
   value: unknown,
   fallbackOrder = 0
 ): StoryflowFolder | null => {
@@ -627,30 +639,71 @@ const normalizeStoryflowFolder = (
   };
 };
 
-const readDocuments = (): StoryflowDocument[] => {
-  const raw = readJson<unknown[]>(STORYFLOW_KEY, []);
-  if (!Array.isArray(raw)) return [];
+let cachedDocuments: StoryflowDocument[] = [];
+let cachedFolders: StoryflowFolder[] = [];
+let persistQueue: Promise<void> = Promise.resolve();
 
-  return raw
-    .map((item, index) => normalizeStoryflowDocument(item, raw.length - index))
+const normalizeDocuments = (documents: StoryflowDocument[]) =>
+  documents
+    .map((item, index) => normalizeStoryflowDocument(item, documents.length - index))
     .filter((item): item is StoryflowDocument => Boolean(item));
-};
 
-const writeDocuments = (documents: StoryflowDocument[]) => {
-  writeJson(STORYFLOW_KEY, documents);
-};
-
-const readFolders = (): StoryflowFolder[] => {
-  const raw = readJson<unknown[]>(STORYFLOW_FOLDER_KEY, []);
-  if (!Array.isArray(raw)) return [];
-
-  return raw
-    .map((item, index) => normalizeStoryflowFolder(item, raw.length - index))
+const normalizeFolders = (folders: StoryflowFolder[]) =>
+  folders
+    .map((item, index) => normalizeStoryflowFolder(item, folders.length - index))
     .filter((item): item is StoryflowFolder => Boolean(item));
+
+const setDocumentsCache = (documents: StoryflowDocument[]) => {
+  cachedDocuments = normalizeDocuments(documents);
 };
 
-const writeFolders = (folders: StoryflowFolder[]) => {
-  writeJson(STORYFLOW_FOLDER_KEY, folders);
+const setFoldersCache = (folders: StoryflowFolder[]) => {
+  cachedFolders = normalizeFolders(folders);
+};
+
+const queuePersist = (task: () => Promise<void>) => {
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(task)
+    .catch((error) => {
+      console.error("Failed to persist storyflow library:", error);
+    });
+  return persistQueue;
+};
+
+export const hydrateTeacherStoryflowLibrary = async (teacherUsername: string) => {
+  const normalized = teacherUsername.trim();
+  if (!normalized) {
+    return { documents: [], folders: [] };
+  }
+
+  await ensureStoryflowBootstrap();
+  const library = await fetchTeacherStoryflowLibrary(normalized);
+  setDocumentsCache([
+    ...cachedDocuments.filter((item) => item.teacherUsername !== normalized),
+    ...library.documents,
+  ]);
+  setFoldersCache([
+    ...cachedFolders.filter((item) => item.teacherUsername !== normalized),
+    ...library.folders,
+  ]);
+  return library;
+};
+
+export const hydrateTeacherStoryflowDocuments = async (teacherUsername: string) => {
+  const { documents } = await hydrateTeacherStoryflowLibrary(teacherUsername);
+  return documents;
+};
+
+export const hydrateTeacherStoryflowFolders = async (teacherUsername: string) => {
+  const { folders } = await hydrateTeacherStoryflowLibrary(teacherUsername);
+  return folders;
+};
+
+export const hydrateStoryflowDocumentsForTeachers = async (teacherUsernames: string[]) => {
+  const normalized = Array.from(new Set(teacherUsernames.map((item) => item.trim()).filter(Boolean)));
+  await Promise.all(normalized.map((teacherUsername) => hydrateTeacherStoryflowDocuments(teacherUsername)));
+  return cachedDocuments;
 };
 
 const getDocSortValue = (item: StoryflowDocument) =>
@@ -665,7 +718,7 @@ export const getTeacherStoryflowDocuments = (
   const normalized = teacherUsername.trim();
   if (!normalized) return [];
 
-  return readDocuments()
+  return cachedDocuments
     .filter((item) => item.teacherUsername === normalized)
     .sort((left, right) => {
       const diff = getDocSortValue(right) - getDocSortValue(left);
@@ -679,7 +732,7 @@ export const getTeacherStoryflowFolders = (
   const normalized = teacherUsername.trim();
   if (!normalized) return [];
 
-  return readFolders()
+  return cachedFolders
     .filter((item) => item.teacherUsername === normalized)
     .sort((left, right) => {
       const diff = getFolderSortValue(right) - getFolderSortValue(left);
@@ -737,11 +790,10 @@ export const saveTeacherStoryflowDocument = (
     analysis: payload.analysis,
   };
 
-  try {
-    writeDocuments([document, ...readDocuments()]);
-  } catch {
-    throw new Error("老师资料库存储失败：浏览器本地存储空间不足。");
-  }
+  setDocumentsCache([document, ...cachedDocuments]);
+  void queuePersist(async () => {
+    await persistStoryflowDocument(document);
+  });
 
   return document;
 };
@@ -753,12 +805,15 @@ export const deleteTeacherStoryflowDocument = (
   const normalized = teacherUsername.trim();
   if (!normalized || !documentId) return;
 
-  writeDocuments(
-    readDocuments().filter(
+  setDocumentsCache(
+    cachedDocuments.filter(
       (item) =>
         !(item.teacherUsername === normalized && item.id === documentId)
     )
   );
+  void queuePersist(async () => {
+    await removeStoryflowDocument(normalized, documentId);
+  });
 };
 
 export const updateTeacherStoryflowDocument = (
@@ -769,7 +824,7 @@ export const updateTeacherStoryflowDocument = (
   const normalized = teacherUsername.trim();
   if (!normalized || !documentId) return null;
 
-  const all = readDocuments();
+  const all = cachedDocuments;
   let updatedDocument: StoryflowDocument | null = null;
 
   const next = all.map((item) => {
@@ -795,7 +850,12 @@ export const updateTeacherStoryflowDocument = (
     return updatedDocument;
   });
 
-  writeDocuments(next);
+  setDocumentsCache(next);
+  if (updatedDocument) {
+    void queuePersist(async () => {
+      await replaceStoryflowDocument(normalized, updatedDocument as StoryflowDocument);
+    });
+  }
   return updatedDocument;
 };
 
@@ -818,7 +878,7 @@ export const reorderTeacherStoryflowDocuments = (
     nextOrder.map((id, index) => [id, baseSortOrder - index] as const)
   );
 
-  const nextDocuments = readDocuments().map((item) =>
+  const nextDocuments = cachedDocuments.map((item) =>
     item.teacherUsername === normalized && sortOrderById.has(item.id)
       ? {
           ...item,
@@ -828,7 +888,10 @@ export const reorderTeacherStoryflowDocuments = (
       : item
   );
 
-  writeDocuments(nextDocuments);
+  setDocumentsCache(nextDocuments);
+  void queuePersist(async () => {
+    await persistStoryflowDocumentOrder(normalized, nextOrder);
+  });
   return getTeacherStoryflowDocuments(normalized);
 };
 
@@ -851,7 +914,10 @@ export const createTeacherStoryflowFolder = (
     sortOrder: timestamp,
   };
 
-  writeFolders([folder, ...readFolders()]);
+  setFoldersCache([folder, ...cachedFolders]);
+  void queuePersist(async () => {
+    await persistStoryflowFolder(folder);
+  });
   return folder;
 };
 
@@ -864,7 +930,7 @@ export const updateTeacherStoryflowFolder = (
   if (!normalized || !folderId) return null;
 
   let updatedFolder: StoryflowFolder | null = null;
-  const nextFolders = readFolders().map((item) => {
+  const nextFolders = cachedFolders.map((item) => {
     if (item.teacherUsername !== normalized || item.id !== folderId) {
       return item;
     }
@@ -881,7 +947,12 @@ export const updateTeacherStoryflowFolder = (
     return updatedFolder;
   });
 
-  writeFolders(nextFolders);
+  setFoldersCache(nextFolders);
+  if (updatedFolder) {
+    void queuePersist(async () => {
+      await replaceStoryflowFolder(normalized, updatedFolder as StoryflowFolder);
+    });
+  }
   return updatedFolder;
 };
 
@@ -892,19 +963,22 @@ export const deleteTeacherStoryflowFolder = (
   const normalized = teacherUsername.trim();
   if (!normalized || !folderId) return;
 
-  writeFolders(
-    readFolders().filter(
+  setFoldersCache(
+    cachedFolders.filter(
       (item) => !(item.teacherUsername === normalized && item.id === folderId)
     )
   );
 
-  writeDocuments(
-    readDocuments().map((item) =>
+  setDocumentsCache(
+    cachedDocuments.map((item) =>
       item.teacherUsername === normalized && item.folderId === folderId
         ? { ...item, folderId: null, updatedAt: Date.now() }
         : item
     )
   );
+  void queuePersist(async () => {
+    await removeStoryflowFolder(normalized, folderId);
+  });
 };
 
 export const reorderTeacherStoryflowFolders = (
@@ -926,13 +1000,16 @@ export const reorderTeacherStoryflowFolders = (
     nextOrder.map((id, index) => [id, baseSortOrder - index] as const)
   );
 
-  writeFolders(
-    readFolders().map((item) =>
+  setFoldersCache(
+    cachedFolders.map((item) =>
       item.teacherUsername === normalized && sortOrderById.has(item.id)
         ? { ...item, sortOrder: sortOrderById.get(item.id) }
         : item
     )
   );
 
+  void queuePersist(async () => {
+    await persistStoryflowFolderOrder(normalized, nextOrder);
+  });
   return getTeacherStoryflowFolders(normalized);
 };

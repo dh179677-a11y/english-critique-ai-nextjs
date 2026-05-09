@@ -1,4 +1,12 @@
 import type { StoryflowDocument } from "@/lib/storyflowStore";
+import {
+  ensureStoryflowBootstrap,
+  fetchStoryflowAssignmentById,
+  fetchStudentStoryflowAssignments,
+  fetchTeacherStoryflowAssignments,
+  persistPublishedStoryflowAssignments,
+  replaceStoryflowAssignment,
+} from "@/lib/storyflowPortalClient";
 import type { AnalysisResult } from "@/types";
 
 export interface StoryflowShadowSubmission {
@@ -105,7 +113,7 @@ const normalizeShadowSubmission = (value: unknown): StoryflowShadowSubmission | 
   };
 };
 
-const normalizeAssignment = (value: unknown): StoryflowAssignment | null => {
+export const normalizeAssignment = (value: unknown): StoryflowAssignment | null => {
   if (!value || typeof value !== "object") return null;
 
   const item = value as Partial<StoryflowAssignment>;
@@ -138,36 +146,86 @@ const normalizeAssignment = (value: unknown): StoryflowAssignment | null => {
   };
 };
 
-const readAssignments = (): StoryflowAssignment[] => {
-  const raw = readJson<unknown[]>(STORYFLOW_ASSIGNMENTS_KEY, []);
-  if (!Array.isArray(raw)) return [];
+let cachedAssignments: StoryflowAssignment[] = [];
+let persistQueue: Promise<void> = Promise.resolve();
 
-  return raw
+const normalizeAssignments = (assignments: StoryflowAssignment[]) =>
+  assignments
     .map((item) => normalizeAssignment(item))
     .filter((item): item is StoryflowAssignment => Boolean(item))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+
+const setAssignmentsCache = (assignments: StoryflowAssignment[]) => {
+  cachedAssignments = normalizeAssignments(assignments);
 };
 
-const writeAssignments = (assignments: StoryflowAssignment[]) => {
-  writeJson(STORYFLOW_ASSIGNMENTS_KEY, assignments);
+const queuePersist = (task: () => Promise<void>) => {
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(task)
+    .catch((error) => {
+      console.error("Failed to persist storyflow assignments:", error);
+    });
+  return persistQueue;
 };
+
+export async function hydrateTeacherStoryflowAssignments(teacherUsername: string) {
+  const normalized = teacherUsername.trim();
+  if (!normalized) return [];
+
+  await ensureStoryflowBootstrap();
+  const assignments = await fetchTeacherStoryflowAssignments(normalized);
+  setAssignmentsCache([
+    ...cachedAssignments.filter((item) => item.teacherUsername !== normalized),
+    ...assignments,
+  ]);
+  return assignments;
+}
+
+export async function hydrateStudentStoryflowAssignments(studentUsername: string) {
+  const normalized = studentUsername.trim();
+  if (!normalized) return [];
+
+  await ensureStoryflowBootstrap();
+  const assignments = await fetchStudentStoryflowAssignments(normalized);
+  setAssignmentsCache([
+    ...cachedAssignments.filter((item) => item.studentUsername !== normalized),
+    ...assignments,
+  ]);
+  return assignments;
+}
+
+export async function hydrateStoryflowAssignmentById(assignmentId: string) {
+  const normalized = assignmentId.trim();
+  if (!normalized) return null;
+
+  await ensureStoryflowBootstrap();
+  const assignment = await fetchStoryflowAssignmentById(normalized);
+  if (!assignment) return null;
+
+  setAssignmentsCache([
+    assignment,
+    ...cachedAssignments.filter((item) => item.id !== assignment.id),
+  ]);
+  return assignment;
+}
 
 export const getTeacherStoryflowAssignments = (teacherUsername: string) => {
   const normalized = teacherUsername.trim();
   if (!normalized) return [];
-  return readAssignments().filter((item) => item.teacherUsername === normalized);
+  return cachedAssignments.filter((item) => item.teacherUsername === normalized);
 };
 
 export const getStudentStoryflowAssignments = (studentUsername: string) => {
   const normalized = studentUsername.trim();
   if (!normalized) return [];
-  return readAssignments().filter((item) => item.studentUsername === normalized);
+  return cachedAssignments.filter((item) => item.studentUsername === normalized);
 };
 
 export const getStoryflowAssignmentById = (assignmentId: string) => {
   const normalized = assignmentId.trim();
   if (!normalized) return null;
-  return readAssignments().find((item) => item.id === normalized) || null;
+  return cachedAssignments.find((item) => item.id === normalized) || null;
 };
 
 export const publishStoryflowAssignments = (
@@ -185,7 +243,7 @@ export const publishStoryflowAssignments = (
   }
 
   const timestamp = Date.now();
-  const current = readAssignments().filter(
+  const current = cachedAssignments.filter(
     (item) =>
       !students.some(
         (student) =>
@@ -207,7 +265,10 @@ export const publishStoryflowAssignments = (
     updatedAt: timestamp,
   }));
 
-  writeAssignments([...created, ...current]);
+  setAssignmentsCache([...created, ...current]);
+  void queuePersist(async () => {
+    await persistPublishedStoryflowAssignments(created);
+  });
   return created;
 };
 
@@ -218,7 +279,7 @@ export const updateStoryflowAssignment = (
   const normalized = assignmentId.trim();
   if (!normalized) return null;
 
-  const current = readAssignments();
+  const current = cachedAssignments;
   let updatedAssignment: StoryflowAssignment | null = null;
   const next = current.map((item) => {
     if (item.id !== normalized) return item;
@@ -235,6 +296,11 @@ export const updateStoryflowAssignment = (
     return updatedAssignment;
   });
 
-  writeAssignments(next);
+  setAssignmentsCache(next);
+  if (updatedAssignment) {
+    void queuePersist(async () => {
+      await replaceStoryflowAssignment(updatedAssignment as StoryflowAssignment);
+    });
+  }
   return updatedAssignment;
 };

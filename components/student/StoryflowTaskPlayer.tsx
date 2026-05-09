@@ -8,6 +8,7 @@ import type { SessionUser } from "@/lib/clientAuth";
 import {
   buildDefaultStoryflowPerformanceConfig,
   getTeacherStoryflowDocuments,
+  hydrateTeacherStoryflowDocuments,
   type StoryflowAnalysis,
   type StoryflowCustomView,
   type StoryflowPageAudioSegmentSlot,
@@ -16,6 +17,7 @@ import {
 } from "@/lib/storyflowStore";
 import {
   getStoryflowAssignmentById,
+  hydrateStoryflowAssignmentById,
   type StoryflowAssignment,
   updateStoryflowAssignment,
 } from "@/lib/storyflowAssignments";
@@ -778,14 +780,36 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const recordingStartMsRef = useRef<number>(0);
 
   useEffect(() => {
-    const currentAssignment = getStoryflowAssignmentById(assignmentId);
-    if (!currentAssignment || currentAssignment.studentUsername !== session.username) {
-      setAssignment(null);
-      setError("没有找到这个任务，或者你没有权限查看。");
-      return;
-    }
-    setAssignment(currentAssignment);
-    setError(null);
+    let disposed = false;
+
+    void hydrateStoryflowAssignmentById(assignmentId)
+      .then(async (hydratedAssignment) => {
+        const currentAssignment =
+          hydratedAssignment || getStoryflowAssignmentById(assignmentId);
+        if (!currentAssignment || currentAssignment.studentUsername !== session.username) {
+          if (!disposed) {
+            setAssignment(null);
+            setError("没有找到这个任务，或者你没有权限查看。");
+          }
+          return;
+        }
+
+        await hydrateTeacherStoryflowDocuments(currentAssignment.teacherUsername);
+        if (!disposed) {
+          setAssignment(currentAssignment);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setAssignment(null);
+          setError("任务加载失败，请刷新后重试。");
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, [assignmentId, session.username]);
 
   const document = useMemo(() => {

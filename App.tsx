@@ -8,7 +8,10 @@ import ScoreChart from './components/ScoreChart';
 import FeedbackSection from './components/FeedbackSection';
 import { getSessionProfile } from './lib/clientAuth';
 import { bootstrapPortalFromLocal, logoutUser, saveUserRecord } from './lib/portalClient';
-import { getStudentStoryflowAssignments } from './lib/storyflowAssignments';
+import {
+  getStudentStoryflowAssignments,
+  hydrateStudentStoryflowAssignments,
+} from './lib/storyflowAssignments';
 
 type AppProps = {
   mode?: 'dashboard' | 'upload';
@@ -36,7 +39,13 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
     const user = getSessionProfile();
     if (!user) return;
     setCurrentUser(user.displayName || user.username);
-    setTaskCount(getStudentStoryflowAssignments(user.username).length);
+    void hydrateStudentStoryflowAssignments(user.username)
+      .then(() => {
+        setTaskCount(getStudentStoryflowAssignments(user.username).length);
+      })
+      .catch(() => {
+        setTaskCount(getStudentStoryflowAssignments(user.username).length);
+      });
   }, []);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
