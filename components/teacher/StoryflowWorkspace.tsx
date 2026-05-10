@@ -6213,7 +6213,6 @@ const MetadataEditorPanel = ({
   }) => void;
   onClose: () => void;
 }) => {
-  const importTextInputRef = useRef<HTMLInputElement | null>(null);
   const [title, setTitle] = useState(document.analysis.title || document.sourceName || "");
   const [summary, setSummary] = useState(document.analysis.summary || "");
   const [characters, setCharacters] = useState(document.analysis.characters.join("\n"));
@@ -6224,6 +6223,7 @@ const MetadataEditorPanel = ({
   const [mindMapMiddle, setMindMapMiddle] = useState(document.analysis.mindMap.middle.join("\n"));
   const [mindMapEnd, setMindMapEnd] = useState(document.analysis.mindMap.end.join("\n"));
   const [originalText, setOriginalText] = useState("");
+  const [bulkImportText, setBulkImportText] = useState("");
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
 
@@ -6238,66 +6238,46 @@ const MetadataEditorPanel = ({
     setMindMapMiddle(document.analysis.mindMap.middle.join("\n"));
     setMindMapEnd(document.analysis.mindMap.end.join("\n"));
     setOriginalText("");
+    setBulkImportText("");
     setImportStatus(null);
     setImportError(null);
   }, [document]);
 
-  const handleImportStructuredText = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    try {
-      const file = event.target.files?.[0];
-      if (!file) return;
-      setImportError(null);
-      setImportStatus("正在读取文本...");
-      const candidates = await decodeImportedTextCandidates(file);
-      const ranked = candidates
-        .map((content) => {
-          const parsed = parseStructuredMetadataImport(content);
-          const matchedCount = Object.values(parsed).filter((item) => item.trim().length > 0).length;
-          return { parsed, matchedCount };
-        })
-        .sort((left, right) => right.matchedCount - left.matchedCount);
-      const { parsed, matchedCount } = ranked[0] || {
-        parsed: parseStructuredMetadataImport(""),
-        matchedCount: 0,
-      };
-
-      if (!matchedCount) {
-        setImportStatus(null);
-        setImportError("没有识别到可导入的标题段落，请检查标题是否为“标题/摘要/角色/时间/地点/关键词/开头/中间/结尾”等格式。");
-        return;
-      }
-
-      if (parsed.title) setTitle(parsed.title);
-      if (parsed.summary) setSummary(parsed.summary);
-      if (parsed.characters) setCharacters(parsed.characters);
-      if (parsed.time) setTime(parsed.time);
-      if (parsed.place) setPlace(parsed.place);
-      if (parsed.keywords) setKeywords(parsed.keywords);
-      if (parsed.mindMapBeginning) setMindMapBeginning(parsed.mindMapBeginning);
-      if (parsed.mindMapMiddle) setMindMapMiddle(parsed.mindMapMiddle);
-      if (parsed.mindMapEnd) setMindMapEnd(parsed.mindMapEnd);
-      if (parsed.originalText) setOriginalText(parsed.originalText);
-      setImportStatus(`已识别并填入 ${matchedCount} 个内容区块，请点击“保存资料信息”生效。`);
-    } finally {
-      if (event.target) {
-        event.target.value = "";
-      }
+  const handleImportStructuredText = () => {
+    const rawText = bulkImportText.trim();
+    if (!rawText) {
+      setImportStatus(null);
+      setImportError("请先粘贴要导入的文本内容。");
+      return;
     }
+
+    setImportError(null);
+    setImportStatus("正在识别粘贴内容...");
+
+    const parsed = parseStructuredMetadataImport(rawText);
+    const matchedCount = Object.values(parsed).filter((item) => item.trim().length > 0).length;
+
+    if (!matchedCount) {
+      setImportStatus(null);
+      setImportError("没有识别到可导入的标题段落，请检查标题是否为“标题/摘要/角色/时间/地点/关键词/开头/中间/结尾”等格式。");
+      return;
+    }
+
+    if (parsed.title) setTitle(parsed.title);
+    if (parsed.summary) setSummary(parsed.summary);
+    if (parsed.characters) setCharacters(parsed.characters);
+    if (parsed.time) setTime(parsed.time);
+    if (parsed.place) setPlace(parsed.place);
+    if (parsed.keywords) setKeywords(parsed.keywords);
+    if (parsed.mindMapBeginning) setMindMapBeginning(parsed.mindMapBeginning);
+    if (parsed.mindMapMiddle) setMindMapMiddle(parsed.mindMapMiddle);
+    if (parsed.mindMapEnd) setMindMapEnd(parsed.mindMapEnd);
+    if (parsed.originalText) setOriginalText(parsed.originalText);
+    setImportStatus(`已识别并填入 ${matchedCount} 个内容区块，请点击“保存资料信息”生效。`);
   };
 
   return (
     <div className="flex flex-col">
-      <input
-        ref={importTextInputRef}
-        type="file"
-        accept=".txt,.md,text/plain"
-        className="hidden"
-        onChange={(event) => {
-          void handleImportStructuredText(event);
-        }}
-      />
       <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
@@ -6306,13 +6286,6 @@ const MetadataEditorPanel = ({
           <h3 className="mt-1 text-xl font-black text-slate-900">编辑资料信息</h3>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => importTextInputRef.current?.click()}
-            className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-700"
-          >
-            批量导入文本
-          </button>
           <button
             type="button"
             onClick={onClose}
@@ -6334,6 +6307,31 @@ const MetadataEditorPanel = ({
             {importStatus}
           </div>
         ) : null}
+
+        <div className="space-y-3 rounded-[1.6rem] border border-cyan-100 bg-cyan-50/70 p-4 md:col-span-2">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-black text-slate-900">直接粘贴导入资料文本</p>
+              <p className="mt-1 text-xs leading-6 text-slate-500">
+                把整理好的标题、摘要、角色、时间、地点、关键词、开头、中间、结尾、原文直接粘贴到这里，系统会自动识别并填入下方字段。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleImportStructuredText}
+              className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-700"
+            >
+              识别并填入
+            </button>
+          </div>
+          <textarea
+            value={bulkImportText}
+            onChange={(event) => setBulkImportText(event.target.value)}
+            rows={8}
+            placeholder={"请直接粘贴文本内容。\n例如：\n标题：...\n摘要：...\n角色：...\n时间：...\n地点：...\n关键词：...\n开头：...\n中间：...\n结尾：...\n原文：..."}
+            className="w-full rounded-2xl border border-cyan-100 bg-white px-4 py-3 text-sm leading-7 text-slate-800 outline-none transition focus:border-cyan-400"
+          />
+        </div>
 
         <label className="space-y-2 md:col-span-2">
           <span className="text-sm font-semibold text-slate-700">标题</span>
@@ -6398,7 +6396,7 @@ const MetadataEditorPanel = ({
           <div>
             <p className="text-sm font-black text-slate-900">编辑思维导图</p>
             <p className="mt-1 text-xs leading-6 text-slate-500">
-              支持手动填写，或通过“批量导入文本”按段落标题自动填入。
+              支持手动填写，或通过上方粘贴文本按段落标题自动填入。
             </p>
           </div>
 

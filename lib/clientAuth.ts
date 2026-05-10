@@ -1,4 +1,3 @@
-import { useSyncExternalStore } from "react";
 import { deleteUserRecords } from "@/lib/clientRecords";
 
 export type UserRole = "teacher" | "student";
@@ -236,7 +235,7 @@ export const getSessionUser = (): string | null => {
   return getSessionProfile()?.username || null;
 };
 
-const subscribeSessionProfile = (listener: () => void) => {
+export const subscribeSessionProfile = (listener: () => void) => {
   if (!isBrowser()) {
     return () => undefined;
   }
@@ -253,9 +252,6 @@ const subscribeSessionProfile = (listener: () => void) => {
     window.removeEventListener(SESSION_CHANGE_EVENT, handleChange);
   };
 };
-
-export const useSessionProfile = () =>
-  useSyncExternalStore(subscribeSessionProfile, getSessionProfile, () => null);
 
 export const getHomePathForRole = (role: UserRole): string =>
   role === "teacher" ? "/teacher" : "/";

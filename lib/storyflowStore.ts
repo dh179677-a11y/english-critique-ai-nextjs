@@ -788,6 +788,21 @@ export const getTeacherStoryflowDocuments = (
     });
 };
 
+export const primeAccessibleTeacherStoryflowDocuments = (
+  teacherUsername: string,
+  documents: StoryflowDocument[]
+) => {
+  const normalized = teacherUsername.trim();
+  if (!normalized) return [];
+
+  setDocumentsCache([
+    ...cachedDocuments.filter((item) => item.teacherUsername !== normalized),
+    ...documents,
+  ]);
+  hydratedAccessibleDocumentsAt.set(normalized, Date.now());
+  return getTeacherStoryflowDocuments(normalized);
+};
+
 export const getTeacherStoryflowFolders = (
   teacherUsername: string
 ): StoryflowFolder[] => {

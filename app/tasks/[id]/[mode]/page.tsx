@@ -3,7 +3,7 @@
 import React from "react";
 import AuthGate from "@/components/AuthGate";
 import StoryflowTaskPlayer from "@/components/student/StoryflowTaskPlayer";
-import { useSessionProfile } from "@/lib/clientAuth";
+import { useSessionProfile } from "@/lib/useSessionProfile";
 
 const ALLOWED_TASK_MODES = new Set([
   "mindmap",

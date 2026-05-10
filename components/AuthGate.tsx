@@ -6,10 +6,10 @@ import {
   clearSessionUser,
   getHomePathForRole,
   setSessionUser,
-  useSessionProfile,
   type UserRole,
 } from "@/lib/clientAuth";
 import { getServerSession } from "@/lib/portalClient";
+import { useSessionProfile } from "@/lib/useSessionProfile";
 
 interface AuthGateProps {
   children: React.ReactNode;

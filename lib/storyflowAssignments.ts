@@ -296,6 +296,24 @@ export const getStoryflowAssignmentById = (assignmentId: string) => {
   return cachedAssignments.find((item) => item.id === normalized) || null;
 };
 
+export const primeStudentStoryflowAssignments = (
+  studentUsername: string,
+  assignments: StoryflowAssignment[]
+) => {
+  const normalized = studentUsername.trim();
+  if (!normalized) return [];
+
+  setAssignmentsCache([
+    ...cachedAssignments.filter((item) => item.studentUsername !== normalized),
+    ...assignments,
+  ]);
+  hydratedStudentAssignmentsAt.set(normalized, Date.now());
+  assignments.forEach((item) => {
+    hydratedAssignmentByIdAt.set(item.id, Date.now());
+  });
+  return getStudentStoryflowAssignments(normalized);
+};
+
 export const publishStoryflowAssignments = async (
   teacherUsername: string,
   teacherDisplayName: string,
