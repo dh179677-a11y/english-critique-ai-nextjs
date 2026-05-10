@@ -1,8 +1,22 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 
-import { getSessionProfile, subscribeSessionProfile } from "@/lib/clientAuth";
+import {
+  getSessionProfile,
+  subscribeSessionProfile,
+  type SessionUser,
+} from "@/lib/clientAuth";
 
-export const useSessionProfile = () =>
-  useSyncExternalStore(subscribeSessionProfile, getSessionProfile, () => null);
+export const useSessionProfile = () => {
+  const [session, setSession] = useState<SessionUser | null>(() => getSessionProfile());
+
+  useEffect(() => {
+    setSession(getSessionProfile());
+    return subscribeSessionProfile(() => {
+      setSession(getSessionProfile());
+    });
+  }, []);
+
+  return session;
+};
