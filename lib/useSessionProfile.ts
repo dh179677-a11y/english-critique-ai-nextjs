@@ -9,7 +9,7 @@ import {
 } from "@/lib/clientAuth";
 
 export const useSessionProfile = () => {
-  const [session, setSession] = useState<SessionUser | null>(() => getSessionProfile());
+  const [session, setSession] = useState<SessionUser | null>(null);
 
   useEffect(() => {
     setSession(getSessionProfile());

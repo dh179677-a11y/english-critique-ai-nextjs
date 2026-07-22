@@ -13,8 +13,10 @@ import {
 import {
   normalizeStoryflowDocument,
   normalizeStoryflowFolder,
+  normalizeStoryflowTeacherSettings,
   type StoryflowDocument,
   type StoryflowFolder,
+  type StoryflowTeacherSettings,
 } from "@/lib/storyflowStore";
 
 type StoryflowAction =
@@ -32,6 +34,7 @@ type StoryflowAction =
   | "updateFolder"
   | "deleteFolder"
   | "reorderFolders"
+  | "updateTeacherSettings"
   | "publishAssignments"
   | "updateAssignment";
 
@@ -108,6 +111,20 @@ function getTeacherFolders(store: Awaited<ReturnType<typeof readStoryflowStore>>
     });
 }
 
+function getTeacherSettings(
+  store: Awaited<ReturnType<typeof readStoryflowStore>>,
+  teacherUsername: string
+): StoryflowTeacherSettings {
+  return (
+    store.settings.find((item) => item.teacherUsername === teacherUsername) ||
+    ({
+      teacherUsername,
+      studentTaskDisplayMode: "folderPreview",
+      updatedAt: Date.now(),
+    } satisfies StoryflowTeacherSettings)
+  );
+}
+
 function mergeByIdPreferNewer<T extends { id: string; updatedAt?: number; createdAt: number }>(
   current: T[],
   incoming: T[]
@@ -178,6 +195,7 @@ async function bootstrapStoryflow(
   await updateStoryflowStore((current) => ({
     documents: mergeByIdPreferNewer(current.documents, allowedDocuments),
     folders: mergeFoldersPreferIncoming(current.folders, allowedFolders),
+    settings: current.settings,
     assignments: mergeByIdPreferNewer(current.assignments, allowedAssignments),
   }));
 
@@ -197,6 +215,7 @@ async function getTeacherLibrary(request: NextRequest, payload: Record<string, u
   return ok({
     documents: getTeacherDocuments(store, teacherUsername),
     folders: getTeacherFolders(store, teacherUsername),
+    settings: getTeacherSettings(store, teacherUsername),
   });
 }
 
@@ -539,6 +558,31 @@ async function reorderFoldersAction(
   return ok(getTeacherFolders(next, teacherUsername));
 }
 
+async function updateTeacherSettingsAction(
+  request: NextRequest,
+  payload: Record<string, unknown> | undefined
+) {
+  const auth = ensureTeacherSession(request);
+  if (auth.error) return auth.error;
+
+  const settings = normalizeStoryflowTeacherSettings(payload?.settings, auth.session.username);
+  if (!settings || settings.teacherUsername !== auth.session.username) {
+    return fail("设置数据无效");
+  }
+
+  await updateStoryflowStore((current) => ({
+    ...current,
+    settings: [
+      settings,
+      ...current.settings.filter(
+        (item) => item.teacherUsername !== settings.teacherUsername
+      ),
+    ],
+  }));
+
+  return ok(settings);
+}
+
 async function publishAssignmentsAction(
   request: NextRequest,
   payload: Record<string, unknown> | undefined
@@ -661,6 +705,8 @@ export async function POST(request: NextRequest) {
       return deleteFolderAction(request, body.payload);
     case "reorderFolders":
       return reorderFoldersAction(request, body.payload);
+    case "updateTeacherSettings":
+      return updateTeacherSettingsAction(request, body.payload);
     case "publishAssignments":
       return publishAssignmentsAction(request, body.payload);
     case "updateAssignment":

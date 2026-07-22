@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import React, { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AuthGate from "@/components/AuthGate";
 import TeacherShell from "@/components/teacher/TeacherShell";
 import type { SessionUser } from "@/lib/clientAuth";
@@ -11,13 +12,16 @@ import {
   deleteTeacherStoryflowFolder,
   getTeacherStoryflowDocuments,
   getTeacherStoryflowFolders,
+  getTeacherStoryflowSettings,
   hydrateTeacherStoryflowLibrary,
   reorderTeacherStoryflowDocuments,
   reorderTeacherStoryflowFolders,
   updateTeacherStoryflowDocument,
   updateTeacherStoryflowFolder,
+  updateTeacherStoryflowSettings,
   type StoryflowDocument,
   type StoryflowFolder,
+  type StoryflowStudentTaskDisplayMode,
 } from "@/lib/storyflowStore";
 
 type FolderFilter = "all" | "root" | string;
@@ -58,7 +62,52 @@ const isDisplayUrl = (value?: string | null) =>
     value.startsWith("http://") ||
     value.startsWith("https://"));
 
+const getStoryflowFileProxyUrl = (objectKey?: string | null) =>
+  objectKey ? `/api/storyflow/file?key=${encodeURIComponent(objectKey)}` : "";
+
+const uploadStoryflowAsset = async (
+  file: File,
+  uploadKind: "source" | "page" | "audio" | "video" = "page"
+) => {
+  const signResponse = await fetch("/api/storyflow/upload", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fileName: file.name,
+      mimeType: file.type,
+      uploadKind,
+    }),
+  });
+
+  const signPayload = (await signResponse.json()) as
+    | { objectKey: string; uploadUrl: string; mimeType: string }
+    | { error: string };
+
+  if (!signResponse.ok || "error" in signPayload) {
+    throw new Error("error" in signPayload ? signPayload.error : "封面上传准备失败");
+  }
+
+  const uploadResponse = await fetch(signPayload.uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": signPayload.mimeType || file.type,
+    },
+    body: file,
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error("封面上传失败");
+  }
+
+  return signPayload.objectKey;
+};
+
 function TeacherStoryflowLibraryContent() {
+  const searchParams = useSearchParams();
+  const folderCoverInputRef = useRef<HTMLInputElement | null>(null);
+  const folderCoverTargetIdRef = useRef<string | null>(null);
   const [session, setSession] = useState<SessionUser | null>(null);
   const [documents, setDocuments] = useState<StoryflowDocument[]>([]);
   const [folders, setFolders] = useState<StoryflowFolder[]>([]);
@@ -66,6 +115,8 @@ function TeacherStoryflowLibraryContent() {
   const [search, setSearch] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("manual");
   const [newFolderName, setNewFolderName] = useState("");
+  const [studentTaskDisplayMode, setStudentTaskDisplayMode] =
+    useState<StoryflowStudentTaskDisplayMode>("folderPreview");
   const [categoryDrafts, setCategoryDrafts] = useState<Record<string, string>>({});
   const [coverUrls, setCoverUrls] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +141,9 @@ function TeacherStoryflowLibraryContent() {
   const refreshData = (teacherUsername: string) => {
     setDocuments(getTeacherStoryflowDocuments(teacherUsername));
     setFolders(getTeacherStoryflowFolders(teacherUsername));
+    setStudentTaskDisplayMode(
+      getTeacherStoryflowSettings(teacherUsername).studentTaskDisplayMode
+    );
   };
 
   useEffect(() => {
@@ -115,6 +169,12 @@ function TeacherStoryflowLibraryContent() {
   }, [session]);
 
   useEffect(() => {
+    const folderId = searchParams.get("folder");
+    if (!folderId || !folders.some((folder) => folder.id === folderId)) return;
+    setFolderFilter(folderId);
+  }, [folders, searchParams]);
+
+  useEffect(() => {
     const nextDrafts: Record<string, string> = {};
     documents.forEach((item) => {
       nextDrafts[item.id] = item.category || "";
@@ -125,8 +185,10 @@ function TeacherStoryflowLibraryContent() {
   useEffect(() => {
     const objectKeys = Array.from(
       new Set(
-        documents
-          .map((item) => item.pageObjectKeys?.[0] || item.thumbnailObjectKey || "")
+        [
+          ...documents.map((item) => item.pageObjectKeys?.[0] || item.thumbnailObjectKey || ""),
+          ...folders.map((item) => item.coverObjectKey || ""),
+        ]
           .filter(Boolean)
       )
     );
@@ -153,7 +215,7 @@ function TeacherStoryflowLibraryContent() {
     return () => {
       disposed = true;
     };
-  }, [documents]);
+  }, [documents, folders]);
 
   const folderCountById = useMemo(() => {
     const counts = new Map<string, number>();
@@ -223,8 +285,12 @@ function TeacherStoryflowLibraryContent() {
     return sorted;
   }, [documents, folderFilter, search, sortMode]);
 
+  const canManuallySortCurrentFolder =
+    sortMode === "manual" && folderFilter !== "all" && folderFilter !== "root";
+
   const moveDocument = (documentId: string, direction: -1 | 1) => {
     if (!session) return;
+    if (!canManuallySortCurrentFolder) return;
     const visibleIds = filteredDocuments.map((item) => item.id);
     const currentIndex = visibleIds.indexOf(documentId);
     const targetId = visibleIds[currentIndex + direction];
@@ -241,9 +307,10 @@ function TeacherStoryflowLibraryContent() {
       nextIds[sourceOrderIndex],
     ];
     reorderTeacherStoryflowDocuments(session.username, nextIds);
+    setSortMode("manual");
     refreshData(session.username);
     setError(null);
-    setNotice("资料顺序已更新。");
+    setNotice("当前课程级别内顺序已更新，学生端会按这个顺序显示。");
   };
 
   const moveFolder = (folderId: string, direction: -1 | 1) => {
@@ -261,7 +328,7 @@ function TeacherStoryflowLibraryContent() {
     reorderTeacherStoryflowFolders(session.username, nextIds);
     refreshData(session.username);
     setError(null);
-    setNotice("文件夹顺序已更新。");
+    setNotice("课程级别顺序已更新。");
   };
 
   const updateDocumentMeta = (
@@ -282,16 +349,28 @@ function TeacherStoryflowLibraryContent() {
       createTeacherStoryflowFolder(session.username, newFolderName);
       refreshData(session.username);
       setNewFolderName("");
-      setNotice("文件夹已创建。");
+      setNotice("课程级别已创建。");
       setError(null);
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "创建文件夹失败");
+      setError(createError instanceof Error ? createError.message : "创建课程级别失败");
     }
+  };
+
+  const changeStudentTaskDisplayMode = (mode: StoryflowStudentTaskDisplayMode) => {
+    if (!session || mode === studentTaskDisplayMode) return;
+    setStudentTaskDisplayMode(mode);
+    updateTeacherStoryflowSettings(session.username, mode);
+    setError(null);
+    setNotice(
+      mode === "folderCovers"
+        ? "学生端已切换为分类封面模式。"
+        : "学生端已切换为分类预览模式。"
+    );
   };
 
   const renameFolder = (folder: StoryflowFolder) => {
     if (!session) return;
-    const nextName = window.prompt("输入新的文件夹名称", folder.name)?.trim();
+    const nextName = window.prompt("输入新的课程级别名称", folder.name)?.trim();
     if (!nextName || nextName === folder.name) return;
     updateTeacherStoryflowFolder(session.username, folder.id, (current) => ({
       ...current,
@@ -299,19 +378,71 @@ function TeacherStoryflowLibraryContent() {
     }));
     refreshData(session.username);
     setError(null);
-    setNotice("文件夹名称已更新。");
+    setNotice("课程级别名称已更新。");
+  };
+
+  const getFolderCoverUrl = (folder: StoryflowFolder) => {
+    if (isDisplayUrl(folder.coverImage)) return folder.coverImage || "";
+    if (folder.coverObjectKey) {
+      return coverUrls[folder.coverObjectKey] || getStoryflowFileProxyUrl(folder.coverObjectKey);
+    }
+    const firstDocument = documents.find((item) => item.folderId === folder.id);
+    const firstObjectKey = firstDocument?.pageObjectKeys?.[0] || firstDocument?.thumbnailObjectKey || "";
+    if (isDisplayUrl(firstDocument?.thumbnail)) return firstDocument?.thumbnail || "";
+    return firstObjectKey ? coverUrls[firstObjectKey] || getStoryflowFileProxyUrl(firstObjectKey) : "";
+  };
+
+  const handleChooseFolderCover = (folderId: string) => {
+    folderCoverTargetIdRef.current = folderId;
+    folderCoverInputRef.current?.click();
+  };
+
+  const handleFolderCoverFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+    const folderId = folderCoverTargetIdRef.current;
+    event.target.value = "";
+    folderCoverTargetIdRef.current = null;
+    if (!session || !folderId || !file) return;
+
+    try {
+      const objectKey = await uploadStoryflowAsset(file, "page");
+      updateTeacherStoryflowFolder(session.username, folderId, (current) => ({
+        ...current,
+        coverImage: "",
+        coverObjectKey: objectKey,
+      }));
+      refreshData(session.username);
+      setError(null);
+      setNotice("课程级别封面已更新。");
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "课程级别封面上传失败");
+    }
+  };
+
+  const clearFolderCover = (folder: StoryflowFolder) => {
+    if (!session) return;
+    updateTeacherStoryflowFolder(session.username, folder.id, (current) => ({
+      ...current,
+      coverImage: "",
+      coverObjectKey: "",
+    }));
+    refreshData(session.username);
+    setError(null);
+    setNotice("课程级别封面已清除。");
   };
 
   const removeFolder = (folder: StoryflowFolder) => {
     if (!session) return;
-    if (!window.confirm(`确认删除文件夹“${folder.name}”吗？文件会回到根目录。`)) return;
+    if (!window.confirm(`确认删除课程级别“${folder.name}”吗？文件会回到根目录。`)) return;
     deleteTeacherStoryflowFolder(session.username, folder.id);
     if (folderFilter === folder.id) {
       setFolderFilter("all");
     }
     refreshData(session.username);
     setError(null);
-    setNotice("文件夹已删除，资料已移回根目录。");
+    setNotice("课程级别已删除，资料已移回根目录。");
   };
 
   const saveCategory = (documentId: string) => {
@@ -334,7 +465,7 @@ function TeacherStoryflowLibraryContent() {
     <TeacherShell
       session={session}
       title="资料整理"
-      subtitle="老师资料库已取消数量上限。你可以在这里创建文件夹、设置分类，并按自己的教学顺序整理全部资料。"
+      subtitle="把文件夹当作课程级别使用，例如 Stage 1、Stage 2。整理好后，这些课程级别会出现在牛津树课程里，并可分配给不同学生。"
       backHref="/teacher/storyflow"
       actions={
         <Link
@@ -345,6 +476,13 @@ function TeacherStoryflowLibraryContent() {
         </Link>
       }
     >
+      <input
+        ref={folderCoverInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleFolderCoverFileChange}
+      />
       <div className="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
         <aside className="space-y-4 rounded-[1.7rem] border border-white/80 bg-white/80 p-4 shadow-[0_18px_50px_rgba(148,163,184,0.12)]">
           <div className="rounded-[1.4rem] bg-slate-900 px-4 py-4 text-white">
@@ -355,8 +493,39 @@ function TeacherStoryflowLibraryContent() {
             <p className="mt-1 text-sm text-white/80">当前资料总数</p>
           </div>
 
+          <div className="rounded-[1.4rem] border border-slate-200 bg-white p-4">
+            <p className="text-sm font-black text-slate-900">学生任务页展示方式</p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => changeStudentTaskDisplayMode("folderCovers")}
+                className={`rounded-2xl px-3 py-2 text-sm font-black transition ${
+                  studentTaskDisplayMode === "folderCovers"
+                    ? "bg-sky-600 text-white shadow-sm"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+              >
+                分类封面
+              </button>
+              <button
+                type="button"
+                onClick={() => changeStudentTaskDisplayMode("folderPreview")}
+                className={`rounded-2xl px-3 py-2 text-sm font-black transition ${
+                  studentTaskDisplayMode === "folderPreview"
+                    ? "bg-sky-600 text-white shadow-sm"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+              >
+                分类预览
+              </button>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-slate-500">
+              分类封面只显示课程级别封面；分类预览每个级别先显示 3 本课程。
+            </p>
+          </div>
+
           <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 p-4">
-            <p className="text-sm font-black text-slate-900">新建文件夹</p>
+            <p className="text-sm font-black text-slate-900">新建课程级别</p>
             <div className="mt-3 flex gap-2">
               <input
                 value={newFolderName}
@@ -367,7 +536,7 @@ function TeacherStoryflowLibraryContent() {
                     createFolder();
                   }
                 }}
-                placeholder="例如：一年级上 / 绘本精读"
+                placeholder="例如：Stage 1 / Stage 2 / Stage 3"
                 className="min-w-0 flex-1 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-sky-300"
               />
               <button
@@ -381,7 +550,7 @@ function TeacherStoryflowLibraryContent() {
           </div>
 
           <div className="rounded-[1.4rem] border border-slate-200 bg-white p-3">
-            <p className="px-2 text-sm font-black text-slate-900">文件夹</p>
+            <p className="px-2 text-sm font-black text-slate-900">课程级别</p>
             <div className="mt-3 space-y-2">
               <button
                 type="button"
@@ -408,63 +577,95 @@ function TeacherStoryflowLibraryContent() {
                 <span>{folderCountById.get("root") || 0}</span>
               </button>
 
-              {folders.map((folder, index) => (
-                <div
-                  key={folder.id}
-                  className={`rounded-2xl border px-3 py-3 ${
-                    folderFilter === folder.id
-                      ? "border-sky-200 bg-sky-50"
-                      : "border-slate-200 bg-slate-50"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setFolderFilter(folder.id)}
-                    className="w-full text-left"
+              {folders.map((folder, index) => {
+                const folderCoverUrl = getFolderCoverUrl(folder);
+                return (
+                  <div
+                    key={folder.id}
+                    className={`rounded-2xl border px-3 py-3 ${
+                      folderFilter === folder.id
+                        ? "border-sky-200 bg-sky-50"
+                        : "border-slate-200 bg-slate-50"
+                    }`}
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="min-w-0 truncate text-sm font-semibold text-slate-900">
-                        {folder.name}
-                      </p>
-                      <span className="text-xs text-slate-500">
-                        {folderCountById.get(folder.id) || 0}
-                      </span>
+                    <button
+                      type="button"
+                      onClick={() => setFolderFilter(folder.id)}
+                      className="w-full text-left"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-2xl bg-sky-100 text-xs font-black text-sky-700">
+                          {folderCoverUrl ? (
+                            <img
+                              src={folderCoverUrl}
+                              alt={folder.name}
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            <span>封面</span>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-slate-900">
+                            {folder.name}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            {folderCountById.get(folder.id) || 0} 本课程
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={index === 0}
+                        onClick={() => moveFolder(folder.id, -1)}
+                        className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+                      >
+                        上移
+                      </button>
+                      <button
+                        type="button"
+                        disabled={index === folders.length - 1}
+                        onClick={() => moveFolder(folder.id, 1)}
+                        className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+                      >
+                        下移
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => renameFolder(folder)}
+                        className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+                      >
+                        编辑名称
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleChooseFolderCover(folder.id)}
+                        className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-sky-700 transition hover:bg-sky-50"
+                      >
+                        设置封面
+                      </button>
+                      {(folder.coverImage || folder.coverObjectKey) && (
+                        <button
+                          type="button"
+                          onClick={() => clearFolderCover(folder)}
+                          className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-500 transition hover:bg-slate-100"
+                        >
+                          清除封面
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeFolder(folder)}
+                        className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-600 transition hover:bg-rose-100"
+                      >
+                        删除
+                      </button>
                     </div>
-                  </button>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={index === 0}
-                      onClick={() => moveFolder(folder.id, -1)}
-                      className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-                    >
-                      上移
-                    </button>
-                    <button
-                      type="button"
-                      disabled={index === folders.length - 1}
-                      onClick={() => moveFolder(folder.id, 1)}
-                      className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-                    >
-                      下移
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => renameFolder(folder)}
-                      className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
-                    >
-                      重命名
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => removeFolder(folder)}
-                      className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-600 transition hover:bg-rose-100"
-                    >
-                      删除
-                    </button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </aside>
@@ -580,7 +781,7 @@ function TeacherStoryflowLibraryContent() {
 
                     <div className="mt-4 grid gap-3">
                       <label className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-                        文件夹
+                        课程级别
                         <select
                           value={item.folderId || "root"}
                           onChange={(event) => {
@@ -591,7 +792,7 @@ function TeacherStoryflowLibraryContent() {
                                 ...document,
                                 folderId: nextFolderId,
                               }),
-                              "文件夹已更新。"
+                              "课程级别已更新。"
                             );
                           }}
                           className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700 outline-none transition focus:border-sky-300"
@@ -646,7 +847,7 @@ function TeacherStoryflowLibraryContent() {
                       >
                         打开编辑
                       </Link>
-                      {sortMode === "manual" ? (
+                      {canManuallySortCurrentFolder ? (
                         <>
                           <button
                             type="button"

@@ -7,7 +7,7 @@
       "role": "student",
       "displayName": "leo",
       "createdAt": 1776489219673,
-      "updatedAt": 1777878269242,
+      "updatedAt": 1784722686783,
       "teacherUsername": "3871",
       "status": "active",
       "classId": "",
@@ -21,7 +21,7 @@
       "address": "",
       "expiryPreset": "unlimited",
       "expiryAt": null,
-      "lastLoginAt": 1777878269242,
+      "lastLoginAt": 1784722686783,
       "studentNo": "001",
       "passwordHash": "c22246e8135c5b18fab658037212a4d2648b7c3bcfd80bea0f50ca848870e7be701f9e785c344206ecbbb3ce4b0e2514f392ef7a7700f2169013e22c06faadfa",
       "passwordSalt": "32f48a9d0986fdfb2316ed2af56dc9c2"
@@ -33,13 +33,19 @@
       "role": "teacher",
       "displayName": "英爸",
       "createdAt": 1776107640248,
-      "updatedAt": 1778060779772,
-      "lastLoginAt": 1778060779772,
+      "updatedAt": 1784722393940,
+      "lastLoginAt": 1784722393940,
       "passwordHash": "29d31516ef584d5642ed85198bc9128ade71ed179932b60465bb9ac996ce248fb2446e72b8124cdba89c343c3ef929e22f86181303c3b5350667c5687fbf723e",
       "passwordSalt": "1772051f0263f971c25a2c8d3e145b9b"
     }
   ],
   "classes": [
+    {
+      "id": "class_1784708440469_dhnooy",
+      "teacherUsername": "3871",
+      "name": "leo的班级",
+      "createdAt": 1784708440469
+    },
     {
       "id": "class_1776872439062_iu4upz",
       "teacherUsername": "3871",
@@ -458,5 +464,8 @@
       },
       "videoObjectKey": "videos/videos/2026/04/1776491770338-2616905d-Window-2026-04-17-234424.mp4"
     }
-  ]
+  ],
+  "featureSettings": {
+    "isSelfPracticeVisible": false
+  }
 }

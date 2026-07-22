@@ -18,12 +18,16 @@ const ALLOWED_MIME_TYPES = new Set([
   "audio/wav",
   "audio/webm",
   "audio/ogg",
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/ogg",
 ]);
 
-type UploadKind = "source" | "page" | "audio";
+type UploadKind = "source" | "page" | "audio" | "video";
 
 const getUploadKind = (value: unknown): UploadKind =>
-  value === "source" ? "source" : value === "audio" ? "audio" : "page";
+  value === "source" ? "source" : value === "audio" ? "audio" : value === "video" ? "video" : "page";
 
 const normalizeMimeType = (contentType: string | null): string => {
   if (!contentType) return "application/octet-stream";
@@ -43,6 +47,9 @@ const resolveFolder = (kind: UploadKind, mimeType: string) => {
   }
   if (kind === "audio") {
     return "storyflow/audio";
+  }
+  if (kind === "video") {
+    return "storyflow/video";
   }
   return "storyflow/pages";
 };

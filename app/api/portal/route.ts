@@ -9,6 +9,10 @@ import type {
 } from "@/lib/clientAuth";
 import type { UserAnalysisRecord } from "@/lib/clientRecords";
 import { readPortalStore, updatePortalStore } from "@/lib/portalStore";
+import {
+  DEFAULT_PORTAL_FEATURE_SETTINGS,
+  type PortalFeatureSettings,
+} from "@/lib/portalFeatureSettings";
 import { hashPassword, verifyPassword } from "@/lib/passwordSecurity";
 import { setSessionCookie } from "@/lib/sessionCookie";
 import type { AnalysisResult } from "@/types";
@@ -35,7 +39,9 @@ type PortalAction =
   | "saveUserRecord"
   | "updateUserRecord"
   | "deleteUserRecords"
-  | "getTeacherOverview";
+  | "getTeacherOverview"
+  | "getPortalFeatureSettings"
+  | "setPortalFeatureSettings";
 
 interface PortalRequestBody {
   action: PortalAction;
@@ -194,6 +200,20 @@ function mergeByIdOrKey<T extends { id?: string }>(
   return Array.from(map.values());
 }
 
+function normalizePortalFeatureSettings(value: unknown): PortalFeatureSettings {
+  if (!value || typeof value !== "object") {
+    return DEFAULT_PORTAL_FEATURE_SETTINGS;
+  }
+
+  const input = value as Partial<PortalFeatureSettings>;
+  return {
+    isSelfPracticeVisible:
+      typeof input.isSelfPracticeVisible === "boolean"
+        ? input.isSelfPracticeVisible
+        : DEFAULT_PORTAL_FEATURE_SETTINGS.isSelfPracticeVisible,
+  };
+}
+
 async function bootstrapPortal(payload: Record<string, unknown> | undefined) {
   const users = Array.isArray(payload?.users) ? (payload.users as AppUser[]) : [];
   const classes = Array.isArray(payload?.classes)
@@ -204,6 +224,7 @@ async function bootstrapPortal(payload: Record<string, unknown> | undefined) {
     : [];
 
   await updatePortalStore((current) => ({
+    ...current,
     users: mergeByIdOrKey(current.users, users, (item) =>
       item.id || `${item.role}:${normalizeUsername(item.username)}`
     ),
@@ -219,6 +240,22 @@ async function bootstrapPortal(payload: Record<string, unknown> | undefined) {
 async function hasTeacherAccount() {
   const store = await readPortalStore();
   return store.users.some((user) => user.role === "teacher");
+}
+
+async function getPortalFeatureSettings() {
+  const store = await readPortalStore();
+  return normalizePortalFeatureSettings(store.featureSettings);
+}
+
+async function setPortalFeatureSettings(payload: Record<string, unknown> | undefined) {
+  const featureSettings = normalizePortalFeatureSettings(payload?.settings);
+
+  await updatePortalStore((current) => ({
+    ...current,
+    featureSettings,
+  }));
+
+  return featureSettings;
 }
 
 async function loginUser(
@@ -687,6 +724,7 @@ async function deleteStudentAccount(
   }
 
   await updatePortalStore((current) => ({
+    ...current,
     users: current.users.filter(
       (user) =>
         !(
@@ -695,7 +733,6 @@ async function deleteStudentAccount(
           user.id === studentId
         )
     ),
-    classes: current.classes,
     records: current.records.filter(
       (record) => record.username !== target.username
     ),
@@ -954,6 +991,10 @@ export async function POST(request: NextRequest) {
         return ok(await deleteUserRecords(String(payload?.username ?? "")));
       case "getTeacherOverview":
         return ok(await getTeacherOverview(String(payload?.teacherUsername ?? "")));
+      case "getPortalFeatureSettings":
+        return ok(await getPortalFeatureSettings());
+      case "setPortalFeatureSettings":
+        return ok(await setPortalFeatureSettings(payload));
       default:
         return fail("不支持的操作");
     }

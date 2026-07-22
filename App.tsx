@@ -9,6 +9,12 @@ import FeedbackSection from './components/FeedbackSection';
 import { getSessionProfile } from './lib/clientAuth';
 import { bootstrapPortalFromLocal, logoutUser, saveUserRecord } from './lib/portalClient';
 import {
+  DEFAULT_PORTAL_FEATURE_SETTINGS,
+  getPortalFeatureSettings,
+  hydratePortalFeatureSettings,
+  subscribePortalFeatureSettings,
+} from './lib/portalFeatureSettings';
+import {
   getStudentStoryflowAssignments,
   hydrateStudentStoryflowAssignments,
 } from './lib/storyflowAssignments';
@@ -25,6 +31,9 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
   const [currentUser, setCurrentUser] = useState<string>('');
   const [taskCount, setTaskCount] = useState<number>(0);
   const [uploadedObjectKey, setUploadedObjectKey] = useState<string | null>(null);
+  const [portalFeatureSettings, setPortalFeatureSettings] = useState(
+    DEFAULT_PORTAL_FEATURE_SETTINGS
+  );
 
   const [studentName, setStudentName] = useState<string>('');
   const [bookName, setBookName] = useState<string>('');
@@ -35,9 +44,14 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
 
   useEffect(() => {
     void bootstrapPortalFromLocal().catch(() => undefined);
+    setPortalFeatureSettings(getPortalFeatureSettings());
+    void hydratePortalFeatureSettings().catch(() => undefined);
+
+    const unsubscribePortalFeatureSettings =
+      subscribePortalFeatureSettings(setPortalFeatureSettings);
 
     const user = getSessionProfile();
-    if (!user) return;
+    if (!user) return unsubscribePortalFeatureSettings;
     setCurrentUser(user.displayName || user.username);
     void hydrateStudentStoryflowAssignments(user.username)
       .then(() => {
@@ -46,6 +60,8 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
       .catch(() => {
         setTaskCount(getStudentStoryflowAssignments(user.username).length);
       });
+
+    return unsubscribePortalFeatureSettings;
   }, []);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -202,20 +218,38 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
               </div>
 
               <div className="rounded-[1.8rem] border border-blue-100 bg-white p-6 shadow-sm">
-                <p className="text-sm font-bold uppercase tracking-[0.28em] text-blue-600">Practice</p>
-                <h2 className="mt-3 text-[2rem] font-black text-slate-900">上传口语视频</h2>
+                <p className="text-sm font-bold uppercase tracking-[0.28em] text-blue-600">Agent</p>
+                <h2 className="mt-3 text-[2rem] font-black text-slate-900">Agent模式</h2>
                 <p className="mt-3 text-sm leading-7 text-slate-600">
-                  进入独立上传页面，提交学生口语视频，AI 会自动生成测评报告。
+                  上传资料，AI老师陪孩子一起学，哪里不会问哪里。
                 </p>
                 <div className="mt-6">
                   <Link
-                    href="/upload"
+                    href="/agent"
                     className="inline-flex items-center rounded-full bg-blue-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-blue-500"
                   >
-                    进入上传页面
+                    进入Agent模式
                   </Link>
                 </div>
               </div>
+
+              {portalFeatureSettings.isSelfPracticeVisible ? (
+                <div className="rounded-[1.8rem] border border-blue-100 bg-white p-6 shadow-sm">
+                  <p className="text-sm font-bold uppercase tracking-[0.28em] text-blue-600">Practice</p>
+                  <h2 className="mt-3 text-[2rem] font-black text-slate-900">口语自测评分</h2>
+                  <p className="mt-3 text-sm leading-7 text-slate-600">
+                    进入独立上传页面，提交学生口语视频，AI 会自动生成测评报告。
+                  </p>
+                  <div className="mt-6">
+                    <Link
+                      href="/upload"
+                      className="inline-flex items-center rounded-full bg-blue-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-blue-500"
+                    >
+                      进入上传页面
+                    </Link>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -365,6 +399,28 @@ const App: React.FC<AppProps> = ({ mode = 'dashboard' }) => {
           </div>
         ) : null}
       </main>
+
+      {mode === 'dashboard' ? (
+        <footer className="px-4 pb-6 text-center text-xs font-medium text-slate-400">
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+            <a
+              href="https://beian.miit.gov.cn/"
+              target="_blank"
+              rel="noreferrer"
+              className="transition hover:text-blue-600"
+            >
+              鲁ICP备2026012101号-1
+            </a>
+            <span>日常咨询：小红书 @英爸</span>
+            <a
+              href="mailto:sakurasa1984@hotmail.com"
+              className="transition hover:text-blue-600"
+            >
+              联系我们：sakurasa1984@hotmail.com
+            </a>
+          </div>
+        </footer>
+      ) : null}
     </div>
   );
 };

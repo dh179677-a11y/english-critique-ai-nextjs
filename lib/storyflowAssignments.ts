@@ -1,4 +1,9 @@
-import type { StoryflowDocument } from "@/lib/storyflowStore";
+import type {
+  StoryflowDocument,
+  StoryflowSpeakingPracticeRecord,
+  StoryflowVoiceSubtitleRecord,
+} from "@/lib/storyflowStore";
+import { normalizeStoryflowVoiceSubtitles } from "@/lib/storyflowStore";
 import {
   ensureStoryflowBootstrap,
   fetchStoryflowAssignmentById,
@@ -19,7 +24,32 @@ export interface StoryflowShadowSubmission {
   studentAssessment?: AnalysisResult | null;
   teacherAssessment?: AnalysisResult | null;
   teacherNote?: string;
+  voiceSubtitles?: StoryflowVoiceSubtitleRecord[];
 }
+
+export interface StoryflowSpeakingSubmission {
+  completedAt: number;
+  latestPracticeRecord?: StoryflowSpeakingPracticeRecord | null;
+  studentAssessment?: AnalysisResult | null;
+  teacherAssessment?: AnalysisResult | null;
+  teacherNote?: string;
+}
+
+export const STORYFLOW_ASSIGNMENT_MODULES = [
+  "animation",
+  "intensive",
+  "shadow",
+  "speaking",
+  "assessment",
+] as const;
+
+export type StoryflowAssignmentModule = (typeof STORYFLOW_ASSIGNMENT_MODULES)[number];
+
+export const DEFAULT_STORYFLOW_ASSIGNMENT_MODULES: StoryflowAssignmentModule[] = [
+  ...STORYFLOW_ASSIGNMENT_MODULES,
+];
+
+const STORYFLOW_ASSIGNMENT_MODULE_SET = new Set<string>(STORYFLOW_ASSIGNMENT_MODULES);
 
 export interface StoryflowAssignment {
   id: string;
@@ -31,7 +61,9 @@ export interface StoryflowAssignment {
   documentTitle: string;
   createdAt: number;
   updatedAt: number;
+  enabledModules: StoryflowAssignmentModule[];
   shadowSubmission?: StoryflowShadowSubmission | null;
+  speakingSubmission?: StoryflowSpeakingSubmission | null;
 }
 
 const STORYFLOW_ASSIGNMENTS_KEY = "ep_storyflow_assignments_v1";
@@ -111,7 +143,82 @@ const normalizeShadowSubmission = (value: unknown): StoryflowShadowSubmission | 
     studentAssessment: normalizeAnalysisResult(item.studentAssessment),
     teacherAssessment: normalizeAnalysisResult(item.teacherAssessment),
     teacherNote: normalizeText(item.teacherNote),
+    voiceSubtitles: normalizeStoryflowVoiceSubtitles(item.voiceSubtitles),
   };
+};
+
+const normalizePracticeTextEntries = (
+  value: unknown
+): StoryflowSpeakingPracticeRecord["promptViewedTexts"] => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const current = item as { pageIndex?: unknown; text?: unknown };
+      const pageIndex = toFiniteNumber(current.pageIndex, -1);
+      const text = normalizeText(current.text);
+      if (pageIndex < 0 || !text) return null;
+      return { pageIndex, text };
+    })
+    .filter(
+      (item): item is StoryflowSpeakingPracticeRecord["promptViewedTexts"][number] =>
+        Boolean(item)
+    );
+};
+
+const normalizeSpeakingPracticeRecord = (
+  value: unknown
+): StoryflowSpeakingPracticeRecord | null => {
+  if (!value || typeof value !== "object") return null;
+  const current = value as Partial<StoryflowSpeakingPracticeRecord>;
+  const id = normalizeText(current.id);
+  if (!id) return null;
+
+  return {
+    id,
+    createdAt: toFiniteNumber(current.createdAt, Date.now()),
+    durationSec: Math.max(0, toFiniteNumber(current.durationSec, 0)),
+    promptRevealCount: Math.max(0, toFiniteNumber(current.promptRevealCount, 0)),
+    originalRevealCount: Math.max(0, toFiniteNumber(current.originalRevealCount, 0)),
+    totalPages: Math.max(0, toFiniteNumber(current.totalPages, 0)),
+    practicedPages: Math.max(0, toFiniteNumber(current.practicedPages, 0)),
+    score: Math.max(0, Math.min(100, toFiniteNumber(current.score, 0))),
+    ratingLabel: normalizeText(current.ratingLabel),
+    promptViewedTexts: normalizePracticeTextEntries(current.promptViewedTexts),
+    originalViewedTexts: normalizePracticeTextEntries(current.originalViewedTexts),
+    voiceSubtitles: normalizeStoryflowVoiceSubtitles(current.voiceSubtitles),
+  };
+};
+
+const normalizeSpeakingSubmission = (value: unknown): StoryflowSpeakingSubmission | null => {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Partial<StoryflowSpeakingSubmission>;
+  const completedAt = toFiniteNumber(item.completedAt, 0);
+  if (!completedAt) return null;
+
+  return {
+    completedAt,
+    latestPracticeRecord: normalizeSpeakingPracticeRecord(item.latestPracticeRecord),
+    studentAssessment: normalizeAnalysisResult(item.studentAssessment),
+    teacherAssessment: normalizeAnalysisResult(item.teacherAssessment),
+    teacherNote: normalizeText(item.teacherNote),
+  };
+};
+
+const normalizeEnabledModules = (value: unknown): StoryflowAssignmentModule[] => {
+  if (!Array.isArray(value)) {
+    return DEFAULT_STORYFLOW_ASSIGNMENT_MODULES;
+  }
+
+  const modules = value
+    .map((item) => normalizeText(item))
+    .filter((item): item is StoryflowAssignmentModule =>
+      STORYFLOW_ASSIGNMENT_MODULE_SET.has(item)
+    )
+    .filter((item, index, collection) => collection.indexOf(item) === index);
+
+  return modules.length ? modules : DEFAULT_STORYFLOW_ASSIGNMENT_MODULES;
 };
 
 export const normalizeAssignment = (value: unknown): StoryflowAssignment | null => {
@@ -128,6 +235,8 @@ export const normalizeAssignment = (value: unknown): StoryflowAssignment | null 
   const createdAt = toFiniteNumber(item.createdAt, Date.now());
   const updatedAt = toFiniteNumber(item.updatedAt, createdAt);
   const shadowSubmission = normalizeShadowSubmission(item.shadowSubmission);
+  const speakingSubmission = normalizeSpeakingSubmission(item.speakingSubmission);
+  const enabledModules = normalizeEnabledModules(item.enabledModules);
 
   if (!id || !teacherUsername || !studentUsername || !documentId || !documentTitle) {
     return null;
@@ -143,7 +252,9 @@ export const normalizeAssignment = (value: unknown): StoryflowAssignment | null 
     documentTitle,
     createdAt,
     updatedAt,
+    enabledModules,
     shadowSubmission,
+    speakingSubmission,
   };
 };
 
@@ -321,7 +432,8 @@ export const publishStoryflowAssignments = async (
   students: Array<{
     username: string;
     displayName: string;
-  }>
+  }>,
+  enabledModules: StoryflowAssignmentModule[] = DEFAULT_STORYFLOW_ASSIGNMENT_MODULES
 ) => {
   const normalizedTeacher = teacherUsername.trim();
   if (!normalizedTeacher || !document?.id || !students.length) {
@@ -329,6 +441,7 @@ export const publishStoryflowAssignments = async (
   }
 
   const timestamp = Date.now();
+  const normalizedEnabledModules = normalizeEnabledModules(enabledModules);
   const current = cachedAssignments.filter(
     (item) =>
       !students.some(
@@ -349,6 +462,7 @@ export const publishStoryflowAssignments = async (
     documentTitle: document.analysis.title || document.sourceName || "图文导学任务",
     createdAt: timestamp,
     updatedAt: timestamp,
+    enabledModules: normalizedEnabledModules,
   }));
 
   setAssignmentsCache([...created, ...current]);

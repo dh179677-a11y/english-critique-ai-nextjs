@@ -6,14 +6,14 @@ import StoryflowTaskPlayer from "@/components/student/StoryflowTaskPlayer";
 import { useSessionProfile } from "@/lib/useSessionProfile";
 
 const ALLOWED_TASK_MODES = new Set([
-  "mindmap",
+  "animation",
+  "intensive",
   "shadow",
   "speaking",
-  "performance",
   "assessment",
 ] as const);
 
-type AllowedTaskMode = "mindmap" | "shadow" | "speaking" | "performance" | "assessment";
+type AllowedTaskMode = "animation" | "intensive" | "shadow" | "speaking" | "assessment";
 
 function StudentTaskModeContent({
   assignmentId,

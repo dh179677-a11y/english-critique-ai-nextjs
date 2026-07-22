@@ -4,11 +4,16 @@ import path from "path";
 import type { AppUser, TeacherClass } from "@/lib/clientAuth";
 import type { UserAnalysisRecord } from "@/lib/clientRecords";
 import { hashPassword } from "@/lib/passwordSecurity";
+import {
+  DEFAULT_PORTAL_FEATURE_SETTINGS,
+  type PortalFeatureSettings,
+} from "@/lib/portalFeatureSettings";
 
 interface PortalStoreData {
   users: AppUser[];
   classes: TeacherClass[];
   records: UserAnalysisRecord[];
+  featureSettings: PortalFeatureSettings;
 }
 
 const STORE_DIR = path.join(process.cwd(), "data");
@@ -18,6 +23,7 @@ const EMPTY_STORE: PortalStoreData = {
   users: [],
   classes: [],
   records: [],
+  featureSettings: DEFAULT_PORTAL_FEATURE_SETTINGS,
 };
 
 let cachedStore: PortalStoreData | null = null;
@@ -29,6 +35,7 @@ function cloneEmptyStore(): PortalStoreData {
     users: [],
     classes: [],
     records: [],
+    featureSettings: DEFAULT_PORTAL_FEATURE_SETTINGS,
   };
 }
 
@@ -59,6 +66,12 @@ function normalizeStore(input: Partial<PortalStoreData> | null | undefined): Por
     users: Array.isArray(input?.users) ? input.users.map(secureStoredUser) : [],
     classes: Array.isArray(input?.classes) ? input.classes : [],
     records: Array.isArray(input?.records) ? input.records : [],
+    featureSettings: {
+      isSelfPracticeVisible:
+        typeof input?.featureSettings?.isSelfPracticeVisible === "boolean"
+          ? input.featureSettings.isSelfPracticeVisible
+          : DEFAULT_PORTAL_FEATURE_SETTINGS.isSelfPracticeVisible,
+    },
   };
 }
 

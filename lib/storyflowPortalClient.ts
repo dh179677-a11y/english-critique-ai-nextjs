@@ -1,5 +1,9 @@
 import type { StoryflowAssignment } from "@/lib/storyflowAssignments";
-import type { StoryflowDocument, StoryflowFolder } from "@/lib/storyflowStore";
+import type {
+  StoryflowDocument,
+  StoryflowFolder,
+  StoryflowTeacherSettings,
+} from "@/lib/storyflowStore";
 
 type StoryflowAction =
   | "bootstrap"
@@ -16,6 +20,7 @@ type StoryflowAction =
   | "updateFolder"
   | "deleteFolder"
   | "reorderFolders"
+  | "updateTeacherSettings"
   | "publishAssignments"
   | "updateAssignment";
 
@@ -109,6 +114,7 @@ export async function fetchTeacherStoryflowLibrary(teacherUsername: string) {
   return storyflowRequest<{
     documents: StoryflowDocument[];
     folders: StoryflowFolder[];
+    settings: StoryflowTeacherSettings;
   }>("getTeacherLibrary", {
     teacherUsername,
   });
@@ -197,6 +203,12 @@ export async function persistStoryflowFolderOrder(
   return storyflowRequest<StoryflowFolder[]>("reorderFolders", {
     teacherUsername,
     orderedFolderIds,
+  });
+}
+
+export async function replaceTeacherStoryflowSettings(settings: StoryflowTeacherSettings) {
+  return storyflowRequest<StoryflowTeacherSettings>("updateTeacherSettings", {
+    settings,
   });
 }
 

@@ -1,66 +1,5 @@
-import OpenAI from "openai";
+import { requestVisionChatCompletion } from "@/lib/storyflowVisionClient";
 import type { StoryflowAnalysis, StoryflowPageAnalysis } from "@/lib/storyflowStore";
-
-const getAiClient = () => {
-  const apiKey = process.env.LLM_API_KEY;
-  const baseURL = process.env.LLM_BASE_URL;
-
-  if (!apiKey) {
-    throw new Error("LLM_API_KEY is not configured on server");
-  }
-
-  if (!baseURL) {
-    throw new Error("LLM_BASE_URL is not configured on server");
-  }
-
-  return new OpenAI({
-    apiKey,
-    baseURL,
-  });
-};
-
-const getModel = () => process.env.LLM_MODEL || "gemini-3-pro-preview";
-
-const extractTextFromContentPart = (part: unknown): string => {
-  if (!part || typeof part !== "object") return "";
-
-  const candidate = part as {
-    text?: unknown;
-    value?: unknown;
-    content?: unknown;
-  };
-
-  if (typeof candidate.text === "string") return candidate.text;
-  if (typeof candidate.value === "string") return candidate.value;
-  if (typeof candidate.content === "string") return candidate.content;
-  return "";
-};
-
-const extractChatCompletionText = (
-  response: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>
-) => {
-  if (!("choices" in response) || !Array.isArray(response.choices)) {
-    return "";
-  }
-
-  const content = response.choices[0]?.message?.content;
-
-  if (typeof content === "string") {
-    return content.trim();
-  }
-
-  if (!Array.isArray(content)) {
-    return "";
-  }
-
-  const contentParts = content as unknown[];
-
-  return contentParts
-    .map(extractTextFromContentPart)
-    .filter((value) => value.trim().length > 0)
-    .join("\n")
-    .trim();
-};
 
 const extractJson = (rawText: string) => {
   const cleaned = rawText
@@ -239,13 +178,6 @@ const normalizeOcrText = (value: string) =>
 export const ocrStoryPageTexts = async (images: string[]): Promise<string[]> => {
   if (!images.length) return [];
 
-  const ai = getAiClient();
-  const defaultModel = getModel();
-  const customOcrModel = process.env.STORYFLOW_OCR_MODEL?.trim() || "";
-  const fallbackOcrModel = process.env.STORYFLOW_OCR_FALLBACK_MODEL?.trim() || "";
-  const models = [customOcrModel, defaultModel, fallbackOcrModel].filter(
-    (item, index, arr): item is string => Boolean(item) && arr.indexOf(item) === index
-  );
   const configuredChunk = Number(process.env.STORYFLOW_OCR_CHUNK_SIZE || 1);
   const CHUNK_SIZE =
     Number.isFinite(configuredChunk) && configuredChunk > 0
@@ -273,41 +205,17 @@ JSON:
 `;
 
     let rawText = "";
-    for (const model of models) {
-      const create = async (withResponseFormat: boolean) =>
-        ai.chat.completions.create({
-          model,
-          temperature: 0,
-          ...(withResponseFormat ? { response_format: { type: "json_object" } } : {}),
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: prompt },
-                ...chunk.flatMap((url, index) => [
-                  { type: "text" as const, text: `Page ${start + index + 1}` },
-                  { type: "image_url" as const, image_url: { url } },
-                ]),
-              ] as never,
-            },
-          ],
-        } as never);
-
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const response = await create(true);
-        rawText = extractChatCompletionText(response);
-      } catch {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const response = await create(false);
-          rawText = extractChatCompletionText(response);
-        } catch {
-          rawText = "";
-        }
-      }
-      if (rawText) break;
-    }
+    const pageMarkers = chunk
+      .map((_, index) => `Page ${start + index + 1}`)
+      .join("\n");
+    const response = await requestVisionChatCompletion({
+      userText: `${prompt}\n\n${pageMarkers}`,
+      images: chunk,
+      temperature: 0,
+      maxTokens: Math.max(260, chunk.length * 120),
+      jsonMode: true,
+    });
+    rawText = response.text;
 
     if (!rawText) continue;
 
@@ -335,8 +243,6 @@ JSON:
 };
 
 const rewriteMindMapToEnglish = async (
-  ai: OpenAI,
-  model: string,
   payload: {
     title: string;
     summary: string;
@@ -370,22 +276,13 @@ Output JSON format:
 }
 `;
 
-  const create = async (withResponseFormat: boolean) =>
-    ai.chat.completions.create({
-      model,
-      temperature: 0.2,
-      ...(withResponseFormat ? { response_format: { type: "json_object" } } : {}),
-      messages: [{ role: "user", content: prompt }],
-    } as never);
-
-  let response: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
-  try {
-    response = await create(true);
-  } catch {
-    response = await create(false);
-  }
-
-  const responseText = extractChatCompletionText(response);
+  const response = await requestVisionChatCompletion({
+    userText: prompt,
+    temperature: 0.2,
+    maxTokens: 260,
+    jsonMode: true,
+  });
+  const responseText = response.text;
   const extracted = extractJson(responseText);
   const parsed = JSON.parse(
     removeTrailingCommas(escapeControlCharsInJsonStrings(extracted))
@@ -428,9 +325,6 @@ export const analyzeStoryImages = async (
     throw new Error("至少需要一张图片才能分析");
   }
 
-  const ai = getAiClient();
-  const model = getModel();
-
   const safePreviewImages =
     previewImages && previewImages.length
       ? previewImages.slice(0, 6)
@@ -470,21 +364,14 @@ JSON:
 { "title": "" }
 `;
 
-    const response = await ai.chat.completions.create({
-      model,
+    const response = await requestVisionChatCompletion({
+      userText: prompt,
+      images: [coverUrl],
       temperature: 0.1,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: coverUrl } },
-          ] as never,
-        },
-      ],
-    } as never);
-
-    const text = extractChatCompletionText(response);
+      maxTokens: 80,
+      jsonMode: true,
+    });
+    const text = response.text;
     const parsed = (extractJsonLoose(text) || {}) as { title?: unknown };
     const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
 
@@ -521,27 +408,17 @@ JSON:
 }
 `;
 
-    const response = await ai.chat.completions.create({
-      model,
+    const pageMarkers = chunk
+      .map((_, index) => `Page ${chunkStartPageIndex + index + 1}:`)
+      .join("\n");
+    const response = await requestVisionChatCompletion({
+      userText: `${prompt}\n\n${pageMarkers}`,
+      images: chunk,
       temperature: 0,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            ...chunk.flatMap((url, index) => [
-              {
-                type: "text" as const,
-                text: `Page ${chunkStartPageIndex + index + 1}:`,
-              },
-              { type: "image_url" as const, image_url: { url } },
-            ]),
-          ] as never,
-        },
-      ],
-    } as never);
-
-    const text = extractChatCompletionText(response);
+      maxTokens: Math.max(700, chunk.length * 180),
+      jsonMode: true,
+    });
+    const text = response.text;
     const parsed = (extractJsonLoose(text) || {}) as {
       events?: unknown;
       pageTexts?: unknown;
@@ -622,13 +499,13 @@ ${mergedSummaryZh}
 }
 `;
 
-    const response = await ai.chat.completions.create({
-      model,
+    const response = await requestVisionChatCompletion({
+      userText: prompt,
       temperature: 0.2,
-      messages: [{ role: "user", content: prompt }],
-    } as never);
-
-    const text = extractChatCompletionText(response);
+      maxTokens: 700,
+      jsonMode: true,
+    });
+    const text = response.text;
     const parsed = (extractJsonLoose(text) || {}) as Partial<StoryflowAnalysis>;
 
     const outline = normalizeAnalysis(parsed);
@@ -728,7 +605,7 @@ ${mergedSummaryZh}
 
   if (needsEnglishMindMap(combined)) {
     try {
-      const mindMap = await rewriteMindMapToEnglish(ai, model, {
+      const mindMap = await rewriteMindMapToEnglish({
         title: combined.title,
         summary: combined.summary,
         mindMap: combined.mindMap,

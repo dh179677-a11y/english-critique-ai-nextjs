@@ -1,5 +1,7 @@
 # EnglishPro Critique AI
 
+使用说明见 [`docs/user-guide.zh-CN.md`](./docs/user-guide.zh-CN.md)。
+
 这是一个基于 Next.js App Router 的前后端一体应用：
 - 前端上传视频并展示评分与点评
 - 后端 API 路由调用兼容 OpenAI 的 LLM 中转

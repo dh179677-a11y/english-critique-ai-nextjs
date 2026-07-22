@@ -12,6 +12,14 @@ import {
   type TeacherOverview,
 } from "@/lib/portalClient";
 import {
+  DEFAULT_PORTAL_FEATURE_SETTINGS,
+  getPortalFeatureSettings,
+  hydratePortalFeatureSettings,
+  persistPortalFeatureSettings,
+  savePortalFeatureSettings,
+  subscribePortalFeatureSettings,
+} from "@/lib/portalFeatureSettings";
+import {
   primaryTeacherModules,
   sideTeacherModules,
   utilityTeacherModules,
@@ -20,6 +28,10 @@ import {
 function TeacherDashboardContent() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [overview, setOverview] = useState<TeacherOverview | null>(null);
+  const [portalFeatureSettings, setPortalFeatureSettings] = useState(
+    DEFAULT_PORTAL_FEATURE_SETTINGS
+  );
+  const [featureSettingsError, setFeatureSettingsError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +69,27 @@ function TeacherDashboardContent() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    setPortalFeatureSettings(getPortalFeatureSettings());
+    void hydratePortalFeatureSettings().catch(() => undefined);
+    return subscribePortalFeatureSettings(setPortalFeatureSettings);
+  }, []);
+
+  const handleToggleSelfPracticeVisibility = () => {
+    setFeatureSettingsError("");
+    const nextSettings = {
+      ...portalFeatureSettings,
+      isSelfPracticeVisible: !portalFeatureSettings.isSelfPracticeVisible,
+    };
+
+    setPortalFeatureSettings(nextSettings);
+    void persistPortalFeatureSettings(nextSettings).catch(() => {
+      setPortalFeatureSettings(portalFeatureSettings);
+      savePortalFeatureSettings(portalFeatureSettings);
+      setFeatureSettingsError("保存失败，请稍后重试。");
+    });
+  };
 
   if (!session || !overview) {
     return null;
@@ -110,6 +143,45 @@ function TeacherDashboardContent() {
                 <p className="mt-1 text-xs text-slate-500">测评</p>
               </div>
             </div>
+          </section>
+
+          <section className="rounded-[1.8rem] bg-white p-5 shadow-[0_20px_60px_rgba(148,163,184,0.14)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-black uppercase tracking-[0.24em] text-blue-600">
+                  学生端功能开关
+                </p>
+                <h3 className="mt-2 text-xl font-black text-slate-900">口语自测评分</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  控制学生首页是否显示独立口语自测入口。
+                </p>
+              </div>
+              <span
+                className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-black ${
+                  portalFeatureSettings.isSelfPracticeVisible
+                    ? "bg-emerald-50 text-emerald-600"
+                    : "bg-slate-100 text-slate-500"
+                }`}
+              >
+                {portalFeatureSettings.isSelfPracticeVisible ? "显示中" : "已隐藏"}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleToggleSelfPracticeVisibility}
+              className={`mt-4 w-full rounded-2xl px-4 py-3 text-sm font-black text-white transition ${
+                portalFeatureSettings.isSelfPracticeVisible
+                  ? "bg-slate-900 hover:bg-slate-700"
+                  : "bg-blue-600 hover:bg-blue-500"
+              }`}
+            >
+              {portalFeatureSettings.isSelfPracticeVisible ? "隐藏口语自测" : "开启口语自测"}
+            </button>
+            {featureSettingsError ? (
+              <p className="mt-2 text-center text-xs font-bold text-rose-500">
+                {featureSettingsError}
+              </p>
+            ) : null}
           </section>
 
           <section className="rounded-[1.8rem] bg-white p-4 shadow-[0_20px_60px_rgba(148,163,184,0.14)]">

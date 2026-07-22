@@ -8,13 +8,16 @@ import {
 import {
   normalizeStoryflowDocument,
   normalizeStoryflowFolder,
+  normalizeStoryflowTeacherSettings,
   type StoryflowDocument,
   type StoryflowFolder,
+  type StoryflowTeacherSettings,
 } from "@/lib/storyflowStore";
 
 interface StoryflowStoreData {
   documents: StoryflowDocument[];
   folders: StoryflowFolder[];
+  settings: StoryflowTeacherSettings[];
   assignments: StoryflowAssignment[];
 }
 
@@ -24,6 +27,7 @@ const STORE_FILE = path.join(STORE_DIR, "storyflow-store.json");
 const EMPTY_STORE: StoryflowStoreData = {
   documents: [],
   folders: [],
+  settings: [],
   assignments: [],
 };
 
@@ -35,6 +39,7 @@ function cloneEmptyStore(): StoryflowStoreData {
   return {
     documents: [],
     folders: [],
+    settings: [],
     assignments: [],
   };
 }
@@ -42,6 +47,7 @@ function cloneEmptyStore(): StoryflowStoreData {
 function normalizeStore(input: Partial<StoryflowStoreData> | null | undefined): StoryflowStoreData {
   const rawDocuments = Array.isArray(input?.documents) ? input.documents : [];
   const rawFolders = Array.isArray(input?.folders) ? input.folders : [];
+  const rawSettings = Array.isArray(input?.settings) ? input.settings : [];
   const rawAssignments = Array.isArray(input?.assignments) ? input.assignments : [];
 
   return {
@@ -51,6 +57,9 @@ function normalizeStore(input: Partial<StoryflowStoreData> | null | undefined): 
     folders: rawFolders
       .map((item, index) => normalizeStoryflowFolder(item, rawFolders.length - index))
       .filter((item): item is StoryflowFolder => Boolean(item)),
+    settings: rawSettings
+      .map((item) => normalizeStoryflowTeacherSettings(item))
+      .filter((item): item is StoryflowTeacherSettings => Boolean(item)),
     assignments: rawAssignments
       .map((item) => normalizeAssignment(item))
       .filter((item): item is StoryflowAssignment => Boolean(item))

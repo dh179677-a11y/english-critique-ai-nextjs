@@ -17,10 +17,13 @@ import {
   type SessionUser,
 } from "@/lib/clientAuth";
 import {
+  DEFAULT_STORYFLOW_ASSIGNMENT_MODULES,
+  STORYFLOW_ASSIGNMENT_MODULES,
   getTeacherStoryflowAssignments,
   hydrateTeacherStoryflowAssignments,
   publishStoryflowAssignments,
   type StoryflowAssignment,
+  type StoryflowAssignmentModule,
   updateStoryflowAssignment,
 } from "@/lib/storyflowAssignments";
 import type { AnalysisResult } from "@/types";
@@ -32,6 +35,7 @@ import {
   saveTeacherStoryflowDocument,
   updateTeacherStoryflowDocument,
   type StoryflowAnalysis,
+  type StoryflowAiAnimation,
   type StoryflowAudioTrack,
   type StoryflowCustomView,
   type StoryflowDocument,
@@ -41,6 +45,7 @@ import {
   type StoryflowPerformanceSectionKey,
   type StoryflowSpeakingPracticeRecord,
   type StoryflowTaskAssessments,
+  type StoryflowVoiceSubtitleRecord,
 } from "@/lib/storyflowStore";
 import PerformanceTaskPreview, {
   PERFORMANCE_SECTION_ORDER,
@@ -49,12 +54,27 @@ import PerformanceTaskPreview, {
 const MAX_PREVIEW_PAGES = 6;
 const MAX_IMAGE_EDGE = 1200;
 const EMPTY_AUDIO_TRACKS: StoryflowAudioTrack[] = [];
+const PAGE_TEXT_AUTO_SAVE_INTERVAL_MS = 20_000;
 
-type TabKey = "mindmap" | "shadow" | "speaking" | "performance" | "feedback";
+type TabKey = "animation" | "intensive" | "shadow" | "speaking" | "feedback";
 type ShadowView =
   | { kind: "single"; pages: [number] }
   | { kind: "spread"; pages: [number | null, number | null] };
-type StoryflowAssessmentKey = "shadow" | "speaking" | "performance";
+type StoryflowAssessmentKey = "shadow" | "speaking";
+const STORYFLOW_MODULE_LABELS: Record<StoryflowAssignmentModule, string> = {
+  animation: "动画伴读",
+  intensive: "绘本精讲",
+  shadow: "影子跟读",
+  speaking: "看图说话",
+  assessment: "得分点评",
+};
+const STORYFLOW_MODULE_DESCRIPTIONS: Record<StoryflowAssignmentModule, string> = {
+  animation: "老师上传的绘本动画伴读",
+  intensive: "AI 老师逐页精讲老师上传的绘本资料",
+  shadow: "听音频、点读、录音和评分",
+  speaking: "看图回忆原文并领取提示",
+  assessment: "查看老师和 AI 点评",
+};
 type AudioSegmentSlot = StoryflowPageAudioSegmentSlot;
 type PdfJsModule = Awaited<typeof import("pdfjs-dist/legacy/build/pdf.mjs")>;
 type PdfJsDocumentInit = Parameters<PdfJsModule["getDocument"]>[0];
@@ -120,12 +140,19 @@ type AudioSlotEntry = {
   text: string;
 };
 
+type DraftAudioMapEntry = {
+  trackIndex: number;
+  startSec: string;
+  endSec: string;
+  hasSegment: boolean;
+};
+
 const areStringArraysEqual = (left: string[], right: string[]) =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
 const areDraftAudioMapsEqual = (
-  left: Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>,
-  right: Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>
+  left: Record<string, DraftAudioMapEntry>,
+  right: Record<string, DraftAudioMapEntry>
 ) => {
   const leftKeys = Object.keys(left);
   const rightKeys = Object.keys(right);
@@ -167,12 +194,6 @@ const STORYFLOW_ASSESSMENT_META: Record<
     homeworkType: "看图说话",
     accentClass: "text-sky-700",
     badgeClass: "bg-sky-100 text-sky-700",
-  },
-  performance: {
-    title: "脱稿表演得分点评",
-    homeworkType: "脱稿表演",
-    accentClass: "text-violet-700",
-    badgeClass: "bg-violet-100 text-violet-700",
   },
 };
 
@@ -271,12 +292,6 @@ const buildStoryflowAssessments = (
       bookName,
       tutorName
     ),
-    performance: normalizeAssessmentResult(
-      document.assessments?.performance,
-      STORYFLOW_ASSESSMENT_META.performance.homeworkType,
-      bookName,
-      tutorName
-    ),
   };
 };
 
@@ -294,6 +309,9 @@ const formatAudioSeconds = (value: number | null | undefined) =>
 const isDisplayUrl = (value?: string | null) =>
   typeof value === "string" &&
   (value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://"));
+
+const getStoryflowFileProxyUrl = (objectKey?: string | null) =>
+  objectKey ? `/api/storyflow/file?key=${encodeURIComponent(objectKey)}` : "";
 
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 const PDFJS_VERSION = "5.6.205";
@@ -424,27 +442,52 @@ const sortAudioAssets = <T extends { sourceFileName: string }>(items: T[]) =>
 const getMediaDuration = (file: File): Promise<number> =>
   new Promise((resolve) => {
     const objectUrl = URL.createObjectURL(file);
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.src = objectUrl;
+    const media = document.createElement(file.type.startsWith("video/") ? "video" : "audio");
+    media.preload = "metadata";
+    media.src = objectUrl;
 
     const cleanup = () => {
       URL.revokeObjectURL(objectUrl);
-      audio.src = "";
+      media.src = "";
     };
 
-    audio.onloadedmetadata = () => {
-      const duration = Number.isFinite(audio.duration) ? Math.max(0, audio.duration) : 0;
+    media.onloadedmetadata = () => {
+      const duration = Number.isFinite(media.duration) ? Math.max(0, media.duration) : 0;
       cleanup();
       resolve(duration);
     };
-    audio.onerror = () => {
+    media.onerror = () => {
       cleanup();
       resolve(0);
     };
   });
 
 const DEFAULT_AUDIO_SEGMENT_SEC = 3;
+const AUTO_NEXT_AUDIO_START_GAP_SEC = 5;
+
+const buildAutoNextAudioDraftEntry = (
+  trackIndex: number,
+  previousEndSec: number,
+  trackDuration: number
+): DraftAudioMapEntry => {
+  const safeDuration = Math.max(0, trackDuration || 0);
+  const desiredStart = Math.max(0, previousEndSec + AUTO_NEXT_AUDIO_START_GAP_SEC);
+  const startSec =
+    safeDuration > 0
+      ? Math.max(0, Math.min(desiredStart, Math.max(0, safeDuration - 0.2)))
+      : desiredStart;
+  const endSec =
+    safeDuration > 0
+      ? Math.max(startSec + 0.2, Math.min(safeDuration, startSec + DEFAULT_AUDIO_SEGMENT_SEC))
+      : startSec + DEFAULT_AUDIO_SEGMENT_SEC;
+
+  return {
+    trackIndex,
+    startSec: startSec.toFixed(2),
+    endSec: endSec.toFixed(2),
+    hasSegment: false,
+  };
+};
 
 const getAudioMimeType = (file: File) => {
   if (file.type && file.type.startsWith("audio/")) {
@@ -457,6 +500,17 @@ const getAudioMimeType = (file: File) => {
   if (lowerName.endsWith(".webm")) return "audio/webm";
   if (lowerName.endsWith(".mp3")) return "audio/mpeg";
   return "audio/mpeg";
+};
+
+const getVideoMimeType = (file: File) => {
+  if (file.type && file.type.startsWith("video/")) {
+    return file.type;
+  }
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith(".mov")) return "video/quicktime";
+  if (lowerName.endsWith(".webm")) return "video/webm";
+  if (lowerName.endsWith(".ogg") || lowerName.endsWith(".ogv")) return "video/ogg";
+  return "video/mp4";
 };
 
 const getTextWeight = (text: string) => {
@@ -1506,6 +1560,46 @@ const summarizePracticeTexts = (
     .join(" / ");
 };
 
+const formatVoiceSubtitleSummary = (voiceSubtitles?: StoryflowVoiceSubtitleRecord[]) => {
+  if (!voiceSubtitles?.length) return "无";
+  return voiceSubtitles
+    .slice(-8)
+    .map((item) => `${item.role === "student" ? "学生" : "Mia"}：${item.text}`)
+    .join(" / ");
+};
+
+const VoiceSubtitlePreview = ({
+  voiceSubtitles,
+}: {
+  voiceSubtitles?: StoryflowVoiceSubtitleRecord[];
+}) => {
+  if (!voiceSubtitles?.length) return null;
+  return (
+    <div className="mt-4 rounded-[1.1rem] bg-white p-4 shadow-sm">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
+        语音字幕记录
+      </p>
+      <div className="mt-3 max-h-52 space-y-2 overflow-y-auto pr-1">
+        {voiceSubtitles.map((item) => (
+          <div
+            key={item.id}
+            className={`rounded-2xl px-3 py-2 text-sm leading-6 ${
+              item.role === "student"
+                ? "ml-auto max-w-[88%] bg-sky-50 text-sky-900"
+                : "mr-auto max-w-[88%] bg-slate-50 text-slate-700"
+            }`}
+          >
+            <span className="mr-2 text-xs font-black text-slate-400">
+              {item.role === "student" ? "学生" : "Mia"}
+            </span>
+            {item.text}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const buildSpeakingPracticePages = (
   previousPages: StoryflowAnalysis["pages"],
   shadowTexts: string[],
@@ -1627,17 +1721,90 @@ const splitDualPageText = (value: string) => {
   };
 };
 
-const joinDualPageText = (leftText: string, rightText: string) => {
+const splitShadowPageTextByMode = (value: string, isPairMode: boolean) => {
+  const normalized = value.replace(/\r\n?/g, "\n").trim();
+  if (!isPairMode) {
+    return {
+      leftText: normalized,
+      rightText: "",
+    };
+  }
+
+  const markerMatch = normalized.match(/\[RIGHT_PAGE\]/i);
+  if (markerMatch && typeof markerMatch.index === "number") {
+    return {
+      leftText: normalized.slice(0, markerMatch.index).trim(),
+      rightText: normalized.slice(markerMatch.index + markerMatch[0].length).trim(),
+    };
+  }
+
+  const slashIndex = normalized.search(/[／/]/);
+  if (slashIndex >= 0) {
+    return {
+      leftText: normalized.slice(0, slashIndex).trim(),
+      rightText: normalized.slice(slashIndex + 1).trim(),
+    };
+  }
+
+  const blankLineDivider = normalized.split(/\n\s*\n/);
+  if (blankLineDivider.length >= 2) {
+    return {
+      leftText: blankLineDivider[0].trim(),
+      rightText: blankLineDivider.slice(1).join("\n\n").trim(),
+    };
+  }
+
+  return {
+    leftText: normalized,
+    rightText: "",
+  };
+};
+
+const joinDualPageText = (
+  leftText: string,
+  rightText: string,
+  options?: { preserveRightSlot?: boolean }
+) => {
   const safeLeft = leftText.trim();
   const safeRight = rightText.trim();
-  if (safeLeft && safeRight) {
+  if ((safeLeft && safeRight) || options?.preserveRightSlot) {
     return `${safeLeft}\n\n[RIGHT_PAGE]\n${safeRight}`;
   }
   return safeLeft || safeRight;
 };
 
+const normalizeImportedPageTextMode = (rawText: string) => {
+  const normalized = rawText.trim();
+  const slashIndex = normalized.search(/[／/]/);
+  if (slashIndex < 0) {
+    return {
+      isPairMode: false,
+      text: normalized,
+    };
+  }
+
+  const leftText = normalized.slice(0, slashIndex).trim();
+  const rightText = normalized.slice(slashIndex + 1).trim();
+  return {
+    isPairMode: true,
+    text: joinDualPageText(leftText, rightText),
+  };
+};
+
 const mergeDualPageTextToSingle = (leftText: string, rightText: string) =>
   [leftText.trim(), rightText.trim()].filter(Boolean).join("\n");
+
+const updateDraftDualPageTextSlot = (
+  currentText: string,
+  slot: "left" | "right",
+  nextSlotText: string
+) => {
+  const { leftText, rightText } = splitDualPageText(currentText);
+  if (slot === "left") {
+    return joinDualPageText(nextSlotText, rightText, { preserveRightSlot: true });
+  }
+  return joinDualPageText(leftText, nextSlotText, { preserveRightSlot: true });
+};
 
 const AUDIO_SLOT_ORDER: Record<AudioSegmentSlot, number> = {
   single: 0,
@@ -1674,8 +1841,8 @@ const buildAudioSlotEntries = (
     return singleText ? [{ pageIndex, slot: "single" as const, text: singleText }] : [];
   });
 
-const getShadowStepText = (rawText: string, focus: 0 | 1) => {
-  const { leftText, rightText } = splitDualPageText(rawText);
+const getShadowStepText = (rawText: string, focus: 0 | 1, isPairMode = false) => {
+  const { leftText, rightText } = splitShadowPageTextByMode(rawText, isPairMode);
   if (rightText) {
     return (focus === 0 ? leftText : rightText).trim();
   }
@@ -2008,7 +2175,7 @@ const fetchWithTimeout = async (
 const requestUploadTarget = async (
   fileName: string,
   mimeType: string,
-  uploadKind: "source" | "page" | "audio"
+  uploadKind: "source" | "page" | "audio" | "video"
 ) => {
   const response = await fetchWithTimeout(
     "/api/storyflow/upload",
@@ -2041,7 +2208,7 @@ const uploadBlobToCos = async (
   fileName: string,
   mimeType: string,
   blob: Blob,
-  uploadKind: "source" | "page" | "audio"
+  uploadKind: "source" | "page" | "audio" | "video"
 ) => {
   const target = await requestUploadTarget(fileName, mimeType, uploadKind);
   const uploadResponse = await fetchWithTimeout(
@@ -2077,6 +2244,8 @@ const resolveNeededObjectKeys = (documents: StoryflowDocument[], activeId: strin
         }
       });
       item.shadowAudio?.tracks.forEach((track) => keys.add(track.objectKey));
+      item.aiAnimations?.forEach((animation) => keys.add(animation.objectKey));
+      if (item.aiAnimation?.objectKey) keys.add(item.aiAnimation.objectKey);
       item.sourceAssets?.forEach((asset) => keys.add(asset.objectKey));
     }
   }
@@ -2090,22 +2259,21 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
-  const replaceImageInputRef = useRef<HTMLInputElement | null>(null);
-  const insertImageInputRef = useRef<HTMLInputElement | null>(null);
-  const batchImageInputRef = useRef<HTMLInputElement | null>(null);
+  const animationVideoInputRef = useRef<HTMLInputElement | null>(null);
   const pairEditorModeByPageRef = useRef<Record<number, boolean>>({});
   const shadowReaderRef = useRef<ShadowReaderHandle | null>(null);
   const [documents, setDocuments] = useState<StoryflowDocument[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<TabKey>("mindmap");
+  const [activeTab, setActiveTab] = useState<TabKey>("animation");
   const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isBatchTextPasteOpen, setIsBatchTextPasteOpen] = useState(false);
   const [isMetaEditorOpen, setIsMetaEditorOpen] = useState(false);
   const [isPublishOpen, setIsPublishOpen] = useState(false);
   const [selectedPublishStudentIds, setSelectedPublishStudentIds] = useState<string[]>([]);
-  const [replacingPageIndex, setReplacingPageIndex] = useState<number | null>(null);
-  const [insertingAfterPageIndex, setInsertingAfterPageIndex] = useState<number | null>(null);
+  const [selectedPublishModules, setSelectedPublishModules] = useState<StoryflowAssignmentModule[]>([
+    ...DEFAULT_STORYFLOW_ASSIGNMENT_MODULES,
+  ]);
   const [speakingPageIndex, setSpeakingPageIndex] = useState(0);
   const [shadowViewIndex, setShadowViewIndex] = useState(0);
   const [sourceName, setSourceName] = useState("");
@@ -2117,6 +2285,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   const [notice, setNotice] = useState<string | null>(null);
   const [batchTextPasteValue, setBatchTextPasteValue] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isBatchUploadingImages, setIsBatchUploadingImages] = useState(false);
 
   const refreshDocuments = () => {
     const next = getTeacherStoryflowDocuments(session.username);
@@ -2194,6 +2363,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 
   useEffect(() => {
     setSelectedPublishStudentIds([]);
+    setSelectedPublishModules([...DEFAULT_STORYFLOW_ASSIGNMENT_MODULES]);
     setIsPublishOpen(false);
   }, [activeId]);
 
@@ -2257,12 +2427,10 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       return document.thumbnail!;
     }
     if (document.thumbnailObjectKey) {
-      const resolved = resolvedUrls[document.thumbnailObjectKey];
-      if (resolved) return resolved;
+      return getStoryflowFileProxyUrl(document.thumbnailObjectKey);
     }
     if (document.pageObjectKeys?.[0]) {
-      const resolved = resolvedUrls[document.pageObjectKeys[0]];
-      if (resolved) return resolved;
+      return getStoryflowFileProxyUrl(document.pageObjectKeys[0]);
     }
     return "";
   };
@@ -2274,8 +2442,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     }
     const pageObjectKey = document.pageObjectKeys?.[pageIndex];
     if (pageObjectKey) {
-      const resolved = resolvedUrls[pageObjectKey];
-      if (resolved) return resolved;
+      return getStoryflowFileProxyUrl(pageObjectKey);
     }
     return getDocumentThumbnailUrl(document);
   };
@@ -2287,6 +2454,11 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     const track = document.shadowAudio?.tracks?.[trackIndex];
     if (!track) return "";
     return resolvedUrls[track.objectKey] || "";
+  };
+
+  const getAnimationUrl = (animation: StoryflowAiAnimation) => {
+    const objectKey = animation.objectKey;
+    return objectKey ? resolvedUrls[objectKey] || "" : "";
   };
 
   const applyDocumentUpdate = (
@@ -2382,12 +2554,6 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           pages: nextPages,
           shadowPageTexts: nextTexts,
         },
-        shadowAudio: preserveExistingAudioMapping(
-          document.shadowAudio,
-          size,
-          nextTexts,
-          buildPairEditorModeByPage(document, size, nextTexts)
-        ),
       };
     });
     setNotice(`第 ${pageIndex + 1} 页文字已保存。`);
@@ -2427,7 +2593,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     setNotice("已根据当前课文生成“给个提示”内容。");
   };
 
-  const handleSaveAllPageTexts = (texts: string[]) => {
+  const handleSaveAllPageTexts = (texts: string[], options?: { silent?: boolean }) => {
     if (!activeDocument) return;
     applyDocumentUpdate(activeDocument.id, (document) => {
       const size = Math.max(
@@ -2446,15 +2612,11 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           shadowPageTexts: nextTexts,
           fullText: nextTexts.filter(Boolean).join("\n"),
         },
-        shadowAudio: preserveExistingAudioMapping(
-          document.shadowAudio,
-          size,
-          nextTexts,
-          buildPairEditorModeByPage(document, size, nextTexts)
-        ),
       };
     });
-    setNotice("全部页面文字已保存。");
+    if (!options?.silent) {
+      setNotice("全部页面文字已保存。");
+    }
   };
 
   const handleRecognizeTexts = async () => {
@@ -2851,30 +3013,17 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
     }
   };
 
-  const handleReplacePageImageTrigger = (pageIndex: number) => {
-    setReplacingPageIndex(pageIndex);
-    replaceImageInputRef.current?.click();
-  };
-
-  const handleInsertPageImageTrigger = (pageIndex: number) => {
-    setInsertingAfterPageIndex(pageIndex);
-    insertImageInputRef.current?.click();
-  };
-
-  const handleBatchFillImagesTrigger = () => {
-    batchImageInputRef.current?.click();
-  };
-
   const handleBatchFillTextsTrigger = () => {
     setBatchTextPasteValue("");
     setIsBatchTextPasteOpen(true);
   };
 
   const handleReplacePageImage = async (
+    pageIndex: number,
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
     try {
-      if (!activeDocument || replacingPageIndex === null) return;
+      if (!activeDocument || pageIndex === null) return;
       const file = event.target.files?.[0];
       if (!file) return;
       if (!file.type.startsWith("image/")) {
@@ -2882,65 +3031,90 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       }
 
       setError(null);
-      setNotice(`正在替换第 ${replacingPageIndex + 1} 页图片...`);
+      setNotice(`正在替换第 ${pageIndex + 1} 页图片...`);
       const dataUrl = await resizeImageFile(file);
       const blob = await dataUrlToBlob(dataUrl);
-      const objectKey = await uploadBlobToCos(
-        `${activeDocument.sourceName || "story"}-replace-page-${replacingPageIndex + 1}-${Date.now()}.jpg`,
-        "image/jpeg",
-        blob,
-        "page"
-      );
+      let objectKey = "";
+      try {
+        objectKey = await uploadBlobToCos(
+          `${activeDocument.sourceName || "story"}-replace-page-${pageIndex + 1}-${Date.now()}.jpg`,
+          "image/jpeg",
+          blob,
+          "page"
+        );
+      } catch {
+        objectKey = "";
+      }
 
       applyDocumentUpdate(activeDocument.id, (document) => {
         const nextPageKeys = [...(document.pageObjectKeys || [])];
-        if (!nextPageKeys.length || replacingPageIndex >= nextPageKeys.length) {
+        if (!nextPageKeys.length || pageIndex >= nextPageKeys.length) {
           return document;
         }
-        nextPageKeys[replacingPageIndex] = objectKey;
+        const nextImages = Array.from(
+          { length: Math.max(nextPageKeys.length, document.images?.length || 0) },
+          (_, index) => document.images?.[index] || ""
+        );
+        nextImages[pageIndex] = dataUrl;
+        if (objectKey) {
+          nextPageKeys[pageIndex] = objectKey;
+        }
 
         const currentViews = getEffectiveShadowViews(document);
         const targetView = currentViews.find((item) =>
-          item.pages.some((page) => page === replacingPageIndex)
+          item.pages.some((page) => page === pageIndex)
         );
 
         // When replacing a page image, keep the existing view structure intact.
         // Only true spreads should mirror the replacement on both sides.
         if (targetView?.kind === "spread") {
           const [leftPage, rightPage] = targetView.pages;
-          if (typeof leftPage === "number") {
+          if (objectKey && typeof leftPage === "number") {
             nextPageKeys[leftPage] = objectKey;
           }
-          if (typeof rightPage === "number") {
+          if (typeof leftPage === "number") {
+            nextImages[leftPage] = dataUrl;
+          }
+          if (objectKey && typeof rightPage === "number") {
             nextPageKeys[rightPage] = objectKey;
+          }
+          if (typeof rightPage === "number") {
+            nextImages[rightPage] = dataUrl;
           }
         }
 
-        const nextSourceAssets = [
-          ...(document.sourceAssets || []),
-          {
-            fileName: file.name,
-            mimeType: "image/jpeg",
-            objectKey,
-          },
-        ];
+        const nextSourceAssets = objectKey
+          ? [
+              ...(document.sourceAssets || []),
+              {
+                fileName: file.name,
+                mimeType: "image/jpeg",
+                objectKey,
+              },
+            ]
+          : document.sourceAssets || [];
 
         return {
           ...document,
           pageObjectKeys: nextPageKeys,
+          images: nextImages,
+          thumbnail: pageIndex === 0 ? dataUrl : document.thumbnail,
           thumbnailObjectKey:
-            replacingPageIndex === 0 ? objectKey : document.thumbnailObjectKey,
+            pageIndex === 0 && objectKey ? objectKey : document.thumbnailObjectKey,
           sourceAssets: nextSourceAssets,
         };
       });
 
-      setNotice(`第 ${replacingPageIndex + 1} 页图片已替换。`);
+      setNotice(
+        objectKey
+          ? `第 ${pageIndex + 1} 页图片已替换并上传。`
+          : `第 ${pageIndex + 1} 页图片已替换到本地编辑器；远程上传暂时失败，但不影响当前编辑。`
+      );
     } catch (replaceError) {
       setError(
         replaceError instanceof Error ? replaceError.message : "替换图片失败"
       );
     } finally {
-      setReplacingPageIndex(null);
       if (event.target) {
         event.target.value = "";
       }
@@ -2948,10 +3122,11 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   };
 
   const handleInsertPageImage = async (
+    pageIndex: number,
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
     try {
-      if (!activeDocument || insertingAfterPageIndex === null) return;
+      if (!activeDocument || pageIndex === null) return;
       const file = event.target.files?.[0];
       if (!file) return;
       if (!file.type.startsWith("image/")) {
@@ -2959,15 +3134,20 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       }
 
       setError(null);
-      setNotice(`正在新增页面到第 ${insertingAfterPageIndex + 1} 页之后...`);
+      setNotice(`正在新增页面到第 ${pageIndex + 1} 页之后...`);
       const dataUrl = await resizeImageFile(file);
       const blob = await dataUrlToBlob(dataUrl);
-      const objectKey = await uploadBlobToCos(
-        `${activeDocument.sourceName || "story"}-insert-page-${Date.now()}.jpg`,
-        "image/jpeg",
-        blob,
-        "page"
-      );
+      let objectKey = "";
+      try {
+        objectKey = await uploadBlobToCos(
+          `${activeDocument.sourceName || "story"}-insert-page-${Date.now()}.jpg`,
+          "image/jpeg",
+          blob,
+          "page"
+        );
+      } catch {
+        objectKey = "";
+      }
 
       applyDocumentUpdate(activeDocument.id, (document) => {
         const oldPageKeys = [...(document.pageObjectKeys || [])];
@@ -2983,15 +3163,16 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         );
 
         const insertIndex = Math.min(
-          Math.max(0, insertingAfterPageIndex + 1),
+          Math.max(0, pageIndex + 1),
           oldPageKeys.length
         );
         const nextPageKeys = [...oldPageKeys];
         nextPageKeys.splice(insertIndex, 0, objectKey);
-        const nextImages = oldImages.length ? [...oldImages] : oldImages;
-        if (nextImages.length) {
-          nextImages.splice(insertIndex, 0, "");
-        }
+        const nextImages = Array.from(
+          { length: Math.max(oldPageKeys.length, oldImages.length) },
+          (_, index) => oldImages[index] || ""
+        );
+        nextImages.splice(insertIndex, 0, dataUrl);
         const nextTexts = [...oldTexts];
         nextTexts.splice(insertIndex, 0, "");
         const nextPages = buildPreviewPagesFromShadowTexts(
@@ -3030,14 +3211,16 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           pageCount: nextPageKeys.length || document.pageCount,
           pairEditorModePages: nextPairEditorModePages,
           thumbnailObjectKey: nextPageKeys[0] || document.thumbnailObjectKey,
-          sourceAssets: [
-            ...(document.sourceAssets || []),
-            {
-              fileName: file.name,
-              mimeType: "image/jpeg",
-              objectKey,
-            },
-          ],
+          sourceAssets: objectKey
+            ? [
+                ...(document.sourceAssets || []),
+                {
+                  fileName: file.name,
+                  mimeType: "image/jpeg",
+                  objectKey,
+                },
+              ]
+            : document.sourceAssets || [],
           customShadowViews: undefined,
           analysis: {
             ...document.analysis,
@@ -3048,11 +3231,10 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         };
       });
 
-      setNotice("页面已新增。");
+      setNotice(objectKey ? "页面已新增并上传。" : "页面已新增到本地编辑器；远程上传暂时失败，但不影响当前编辑。");
     } catch (insertError) {
       setError(insertError instanceof Error ? insertError.message : "新增页面失败");
     } finally {
-      setInsertingAfterPageIndex(null);
       if (event.target) {
         event.target.value = "";
       }
@@ -3062,9 +3244,10 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
   const handleBatchFillImages = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
+    const input = event.currentTarget;
     try {
       if (!activeDocument) return;
-      const files = Array.from(event.target.files || []).filter((file) =>
+      const files = Array.from(input.files || []).filter((file) =>
         file.type.startsWith("image/")
       );
       if (!files.length) {
@@ -3072,30 +3255,66 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       }
 
       setError(null);
-      setNotice(`正在批量上传图片：1/${files.length}`);
+      setIsBatchUploadingImages(true);
+      setNotice(`已选择 ${files.length} 张图片，正在批量上传：1/${files.length}`);
       const uploadedItems: Array<{
         objectKey: string;
         fileName: string;
+        dataUrl: string;
       }> = [];
+      let remoteUploadFailureCount = 0;
 
       for (let index = 0; index < files.length; index += 1) {
         const file = files[index];
-        setNotice(`正在批量上传图片：${index + 1}/${files.length}`);
+        setNotice(`正在处理图片：${index + 1}/${files.length}`);
         // eslint-disable-next-line no-await-in-loop
         const dataUrl = await resizeImageFile(file);
         // eslint-disable-next-line no-await-in-loop
         const blob = await dataUrlToBlob(dataUrl);
-        // eslint-disable-next-line no-await-in-loop
-        const objectKey = await uploadBlobToCos(
-          `${activeDocument.sourceName || "story"}-batch-page-${index + 1}-${Date.now()}.jpg`,
-          "image/jpeg",
-          blob,
-          "page"
-        );
+        let objectKey = "";
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          objectKey = await uploadBlobToCos(
+            `${activeDocument.sourceName || "story"}-batch-page-${index + 1}-${Date.now()}.jpg`,
+            "image/jpeg",
+            blob,
+            "page"
+          );
+        } catch {
+          remoteUploadFailureCount += 1;
+          objectKey = "";
+        }
         uploadedItems.push({
           objectKey,
           fileName: file.name,
+          dataUrl,
         });
+      }
+
+      const uploadedObjectKeys = uploadedItems.map((item) => item.objectKey).filter(Boolean);
+      if (uploadedObjectKeys.length) {
+        try {
+          const response = await fetch("/api/storyflow/urls", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              objectKeys: uploadedObjectKeys,
+            }),
+          });
+          const payload = (await response.json()) as
+            | { urls: Record<string, string> }
+            | { error: string };
+          if (response.ok && !("error" in payload)) {
+            setResolvedUrls((current) => ({
+              ...current,
+              ...payload.urls,
+            }));
+          }
+        } catch {
+          // The regular URL resolver effect will retry after document state updates.
+        }
       }
 
       applyDocumentUpdate(activeDocument.id, (document) => {
@@ -3112,13 +3331,14 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         );
         const targetPageCount = Math.max(oldPageKeys.length, oldTexts.length, uploadedItems.length);
         const nextPageKeys = Array.from({ length: targetPageCount }, (_, idx) => oldPageKeys[idx] || "");
+        const nextImages = Array.from({ length: targetPageCount }, (_, idx) => oldImages[idx] || "");
         uploadedItems.forEach((item, index) => {
-          nextPageKeys[index] = item.objectKey;
+          if (item.objectKey) {
+            nextPageKeys[index] = item.objectKey;
+          }
+          nextImages[index] = item.dataUrl;
         });
 
-        const nextImages = oldImages.length
-          ? Array.from({ length: targetPageCount }, (_, idx) => oldImages[idx] || "")
-          : oldImages;
         const nextTexts = Array.from({ length: targetPageCount }, (_, idx) => oldTexts[idx] || "");
         const nextPages = buildPreviewPagesFromShadowTexts(
           document.analysis.pages || [],
@@ -3155,14 +3375,17 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           images: nextImages,
           pageCount: targetPageCount,
           pairEditorModePages: nextPairEditorModePages,
+          thumbnail: uploadedItems[0]?.dataUrl || document.thumbnail,
           thumbnailObjectKey: nextPageKeys[0] || document.thumbnailObjectKey,
           sourceAssets: [
             ...(document.sourceAssets || []),
-            ...uploadedItems.map((item) => ({
-              fileName: item.fileName,
-              mimeType: "image/jpeg",
-              objectKey: item.objectKey,
-            })),
+            ...uploadedItems
+              .filter((item) => item.objectKey)
+              .map((item) => ({
+                fileName: item.fileName,
+                mimeType: "image/jpeg",
+                objectKey: item.objectKey,
+              })),
           ],
           customShadowViews: undefined,
           analysis: {
@@ -3175,16 +3398,17 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       });
 
       setNotice(
-        uploadedItems.length >= (activeDocument.pageObjectKeys?.length || 0)
-          ? `已按顺序填充 ${uploadedItems.length} 张图片，页面已同步补齐。`
-          : `已按顺序替换前 ${uploadedItems.length} 页图片。`
+        remoteUploadFailureCount
+          ? `已按顺序填充 ${uploadedItems.length} 张图片到本地编辑器；其中 ${remoteUploadFailureCount} 张远程上传暂时失败。`
+          : uploadedItems.length >= (activeDocument.pageObjectKeys?.length || 0)
+            ? `已按顺序填充 ${uploadedItems.length} 张图片，页面已同步补齐。`
+            : `已按顺序替换前 ${uploadedItems.length} 页图片。`
       );
     } catch (batchError) {
       setError(batchError instanceof Error ? batchError.message : "批量填充图片失败");
     } finally {
-      if (event.target) {
-        event.target.value = "";
-      }
+      setIsBatchUploadingImages(false);
+      input.value = "";
     }
   };
 
@@ -3202,35 +3426,44 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       if (!importedTexts.length) {
         throw new Error("文本文件中没有可导入的页面内容");
       }
+      const importedPageEntries = importedTexts.map(normalizeImportedPageTextMode);
 
       applyDocumentUpdate(activeDocument.id, (document) => {
         const size = Math.max(
           document.pageObjectKeys?.length || 0,
           document.analysis.shadowPageTexts?.length || 0,
-          importedTexts.length
+          importedPageEntries.length
         );
         const nextTexts = Array.from({ length: size }, (_, idx) =>
           (document.analysis.shadowPageTexts?.[idx] || "").trim()
         );
-        let textCursor = 0;
-        Array.from({ length: size }, (_, pageIndex) => pageIndex).forEach((pageIndex) => {
-          if (textCursor >= importedTexts.length) return;
-          if (pairEditorModeByPageRef.current[pageIndex]) {
-            const leftText = importedTexts[textCursor]?.trim() || "";
-            const rightText = importedTexts[textCursor + 1]?.trim() || "";
-            if (!leftText && !rightText) return;
-            nextTexts[pageIndex] = joinDualPageText(leftText, rightText);
-            textCursor += rightText ? 2 : 1;
-            return;
-          }
-
-          nextTexts[pageIndex] = importedTexts[textCursor].trim();
-          textCursor += 1;
+        importedPageEntries.forEach((entry, pageIndex) => {
+          if (pageIndex >= size) return;
+          nextTexts[pageIndex] = entry.text;
         });
         const nextPages = buildPreviewPagesFromShadowTexts(document.analysis.pages || [], nextTexts);
+        const nextPairEditorModePages = remapPairEditorModePages(
+          document.pairEditorModePages,
+          size,
+          (enabled) => {
+            const next = [...enabled];
+            while (next.length < size) next.push(false);
+            importedPageEntries.forEach((entry, pageIndex) => {
+              next[pageIndex] = entry.isPairMode;
+            });
+            return next;
+          }
+        );
+        const nextPairEditorModeByPage = buildPairEditorModeByFlags(
+          Array.from({ length: size }, (_, pageIndex) =>
+            nextPairEditorModePages.includes(pageIndex)
+          ),
+          size
+        );
 
         return {
           ...document,
+          pairEditorModePages: nextPairEditorModePages,
           analysis: {
             ...document.analysis,
             pages: nextPages,
@@ -3241,12 +3474,15 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
             document.shadowAudio,
             size,
             nextTexts,
-            buildPairEditorModeByPage(document, size, nextTexts)
+            nextPairEditorModeByPage
           ),
         };
       });
 
-      setNotice(`已按顺序导入 ${Math.min(importedTexts.length, activeDocument.pageObjectKeys?.length || importedTexts.length)} 页文字。`);
+      const pairModeCount = importedPageEntries.filter((entry) => entry.isPairMode).length;
+      setNotice(
+        `已按顺序导入 ${Math.min(importedPageEntries.length, activeDocument.pageObjectKeys?.length || importedPageEntries.length)} 页文字，其中 ${pairModeCount} 页识别为左右双文本。`
+      );
       setIsBatchTextPasteOpen(false);
       setBatchTextPasteValue("");
     } catch (uploadError) {
@@ -3709,7 +3945,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       const next = getTeacherStoryflowDocuments(session.username);
       setDocuments(next);
       setActiveId(saved.id);
-      setActiveTab("mindmap");
+      setActiveTab("animation");
       setPendingAssets([]);
       if (
         normalizedPayload.title &&
@@ -3754,7 +3990,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       const next = getTeacherStoryflowDocuments(session.username);
       setDocuments(next);
       setActiveId(saved.id);
-      setActiveTab("mindmap");
+      setActiveTab("animation");
       setPendingAssets([]);
       setPendingAudioAssets([]);
       setError(null);
@@ -3830,6 +4066,73 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
       setError(uploadError instanceof Error ? uploadError.message : "音频上传失败");
       setNotice(null);
     }
+  };
+
+  const handleChooseAnimationVideo = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    if (!activeDocument) {
+      setError("请先选中一份绘本资料，再上传动画伴读。");
+      return;
+    }
+
+    if (!file.type.startsWith("video/") && !/\.(mp4|mov|webm|ogg|ogv)$/i.test(file.name)) {
+      setError("请选择视频文件，例如 mp4、mov 或 webm。");
+      return;
+    }
+
+    setError(null);
+    setNotice("正在上传动画伴读视频...");
+
+    try {
+      const currentAnimations = getStoryflowAnimationList(activeDocument);
+      if (currentAnimations.length >= 2) {
+        setNotice(null);
+        setError("动画伴读最多上传 2 个视频。请先移除一个，再上传新的动画。");
+        return;
+      }
+      const mimeType = getVideoMimeType(file);
+      const durationSec = await getMediaDuration(file).catch(() => 0);
+      const objectKey = await uploadBlobToCos(file.name, mimeType, file, "video");
+      const nextAnimations = [
+        ...currentAnimations,
+        {
+          fileName: file.name,
+          mimeType,
+          objectKey,
+          durationSec,
+          uploadedAt: Date.now(),
+        },
+      ].slice(0, 2);
+
+      applyDocumentUpdate(activeDocument.id, (document) => ({
+        ...document,
+        aiAnimations: nextAnimations,
+        aiAnimation: nextAnimations[0] || null,
+      }));
+      setNotice("动画伴读已上传，学生端会在“动画伴读”任务中观看。");
+      setActiveTab("animation");
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "动画伴读上传失败");
+      setNotice(null);
+    }
+  };
+
+  const handleRemoveAnimationVideo = (animationIndex: number) => {
+    if (!activeDocument) return;
+    const nextAnimations = getStoryflowAnimationList(activeDocument).filter(
+      (_, index) => index !== animationIndex
+    );
+    applyDocumentUpdate(activeDocument.id, (document) => ({
+      ...document,
+      aiAnimations: nextAnimations,
+      aiAnimation: nextAnimations[0] || null,
+    }));
+    setNotice("已移除当前绘本的动画伴读视频。");
   };
 
   const handleDelete = (documentId: string) => {
@@ -3963,6 +4266,13 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 
   return (
     <div className="flex flex-col gap-5 xl:grid xl:grid-cols-[340px_minmax(0,1fr)]">
+      <input
+        ref={animationVideoInputRef}
+        type="file"
+        accept="video/*,.mp4,.mov,.webm,.ogg,.ogv"
+        className="hidden"
+        onChange={handleChooseAnimationVideo}
+      />
       <aside className="hidden space-y-5 xl:block">
         <SidePanel
           sourceName={sourceName}
@@ -3988,7 +4298,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
           onCreateManualDocument={handleCreateManualDocument}
           onSelectDocument={(id) => {
             setActiveId(id);
-            setActiveTab("mindmap");
+            setActiveTab("animation");
           }}
         />
       </aside>
@@ -4071,10 +4381,16 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
 
               <div className="mt-5 flex flex-nowrap gap-3 overflow-x-auto rounded-[1.55rem] border border-sky-200/60 bg-sky-200/25 p-3 backdrop-blur">
                 <TabButton
-                  active={activeTab === "mindmap"}
-                  onClick={() => setActiveTab("mindmap")}
+                  active={activeTab === "animation"}
+                  onClick={() => setActiveTab("animation")}
                 >
-                  思维导图
+                  动画伴读
+                </TabButton>
+                <TabButton
+                  active={activeTab === "intensive"}
+                  onClick={() => setActiveTab("intensive")}
+                >
+                  绘本精讲
                 </TabButton>
                 <TabButton
                   active={activeTab === "shadow"}
@@ -4093,12 +4409,6 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
                   onClick={() => setActiveTab("speaking")}
                 >
                   看图说话
-                </TabButton>
-                <TabButton
-                  active={activeTab === "performance"}
-                  onClick={() => setActiveTab("performance")}
-                >
-                  脱稿表演
                 </TabButton>
                 <TabButton
                   active={activeTab === "feedback"}
@@ -4130,8 +4440,15 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               </div>
             </div>
 
-            {activeTab === "mindmap" ? (
-              <MindMapBoard document={activeDocument} />
+            {activeTab === "animation" ? (
+              <AiAnimationStudio
+                document={activeDocument}
+                getVideoUrl={getAnimationUrl}
+                videoInputRef={animationVideoInputRef}
+                onRemoveVideo={handleRemoveAnimationVideo}
+              />
+            ) : activeTab === "intensive" ? (
+              <IntensiveReadingStudio document={activeDocument} />
             ) : activeTab === "shadow" ? (
               <ShadowReader
                 ref={shadowReaderRef}
@@ -4157,7 +4474,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
                   }));
                   setNotice("影子跟读评分已保存到得分点评。");
                 }}
-                onExit={() => setActiveTab("mindmap")}
+                onExit={() => setActiveTab("animation")}
               />
             ) : activeTab === "speaking" ? (
               <SpeakingDeck
@@ -4166,20 +4483,6 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
                 onChangePageIndex={setSpeakingPageIndex}
                 getDocumentPageUrl={getDocumentPageUrl}
                 onSavePracticeRecord={handleSaveSpeakingPracticeRecord}
-              />
-            ) : activeTab === "performance" ? (
-              <PerformanceTaskStudio
-                document={activeDocument}
-                teacherName={session.username}
-                coverImageUrl={getDocumentThumbnailUrl(activeDocument)}
-                onSaveConfig={(config) => {
-                  applyDocumentUpdate(activeDocument.id, (document) => ({
-                    ...document,
-                    performanceConfig: config,
-                  }));
-                }}
-                onNotice={setNotice}
-                onError={setError}
               />
             ) : (
               <ScoreFeedbackBoard
@@ -4291,34 +4594,6 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
         </div>
       ) : null}
 
-      <input
-        ref={replaceImageInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(event) => {
-          void handleReplacePageImage(event);
-        }}
-      />
-      <input
-        ref={insertImageInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(event) => {
-          void handleInsertPageImage(event);
-        }}
-      />
-      <input
-        ref={batchImageInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        className="hidden"
-        onChange={(event) => {
-          void handleBatchFillImages(event);
-        }}
-      />
       {isEditorOpen && activeDocument ? (
         <div className="fixed inset-0 z-[60]">
           <button
@@ -4341,14 +4616,13 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               onSaveAudioMapping={handleSaveAudioMapping}
               onSaveAllAudioMappings={handleSaveAllAudioMappings}
               onRematchAudioWithTexts={handleRematchAudioWithTexts}
-              onBatchFillImages={handleBatchFillImagesTrigger}
+              onBatchFillImages={handleBatchFillImages}
+              isBatchUploadingImages={isBatchUploadingImages}
               onBatchFillTexts={handleBatchFillTextsTrigger}
-              onReplaceImage={handleReplacePageImageTrigger}
-              onInsertPage={handleInsertPageImageTrigger}
+              onReplaceImage={handleReplacePageImage}
+              onInsertPage={handleInsertPageImage}
               onDeletePage={handleDeletePage}
               onAppendBlankPage={handleAppendBlankPage}
-              onSplitView={handleSplitView}
-              onMergeView={handleMergeWithNextView}
               onSetPairEditorMode={(pageIndex, enabled, nextText) => {
                 if (!activeDocument) return;
                 const pageCount = Math.max(
@@ -4422,7 +4696,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               </p>
               <h3 className="mt-2 text-3xl font-black text-slate-900">批量粘贴文本</h3>
               <p className="mt-2 text-sm leading-6 text-slate-500">
-                直接粘贴整段文本，系统会按页码、段落或双文本顺序自动填入页面编辑器。
+                直接粘贴整段文本，系统会按页码、段落自动分页面；每页文字包含 / 时自动识别为左右双文本。
               </p>
             </div>
             <div className="space-y-4 px-6 py-5">
@@ -4431,11 +4705,11 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
                 onChange={(event) => setBatchTextPasteValue(event.target.value)}
                 rows={18}
                 className="w-full rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-7 text-slate-800 outline-none transition focus:border-sky-400 focus:bg-white"
-                placeholder={"请直接粘贴文本内容。\n支持 Page 1 / 第1页 / 空行分段 等格式。"}
+                placeholder={"请直接粘贴文本内容。\n单文本：Dad had spots.\n双文本：Left page text / Right page text"}
               />
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs leading-5 text-slate-500">
-                  如果当前页已开启“左右双文本”，系统会自动按 Left Page / Right Page 顺序连续填充两段文字。
+                  没有 / 的页面会保存为单文本；带 / 的页面会把左侧填入 Left Page，右侧填入 Right Page。
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -4528,7 +4802,7 @@ const StoryflowWorkspace: React.FC<StoryflowWorkspaceProps> = ({
               onCreateManualDocument={handleCreateManualDocument}
               onSelectDocument={(id) => {
                 setActiveId(id);
-                setActiveTab("mindmap");
+                setActiveTab("animation");
                 setIsSidePanelOpen(false);
               }}
             />
@@ -4553,13 +4827,12 @@ const PageEditorPanel = ({
   onSaveAllAudioMappings,
   onRematchAudioWithTexts,
   onBatchFillImages,
+  isBatchUploadingImages,
   onBatchFillTexts,
   onReplaceImage,
   onInsertPage,
   onDeletePage,
   onAppendBlankPage,
-  onSplitView,
-  onMergeView,
   onSetPairEditorMode,
   onClose,
 }: {
@@ -4569,7 +4842,7 @@ const PageEditorPanel = ({
   getDocumentAudioTrackUrl: (doc: StoryflowDocument, trackIndex: number) => string;
   onMovePage: (fromIndex: number, toIndex: number) => void;
   onSavePageText: (pageIndex: number, text: string) => void;
-  onSaveAllPageTexts: (texts: string[]) => void;
+  onSaveAllPageTexts: (texts: string[], options?: { silent?: boolean }) => void;
   onRecognizeTexts: () => Promise<void>;
   onGenerateSpeakingHints: (texts: string[]) => void;
   onSaveAudioMapping: (
@@ -4591,14 +4864,13 @@ const PageEditorPanel = ({
   onRematchAudioWithTexts: (
     texts: string[]
   ) => Promise<StoryflowRematchDiagnostics | null> | StoryflowRematchDiagnostics | null;
-  onBatchFillImages: () => void;
+  onBatchFillImages: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  isBatchUploadingImages: boolean;
   onBatchFillTexts: () => void;
-  onReplaceImage: (pageIndex: number) => void;
-  onInsertPage: (pageIndex: number) => void;
+  onReplaceImage: (pageIndex: number, event: React.ChangeEvent<HTMLInputElement>) => void;
+  onInsertPage: (pageIndex: number, event: React.ChangeEvent<HTMLInputElement>) => void;
   onDeletePage: (pageIndex: number) => void;
   onAppendBlankPage: () => number;
-  onSplitView: (viewIndex: number) => void;
-  onMergeView: (viewIndex: number) => void;
   onSetPairEditorMode: (pageIndex: number, enabled: boolean, nextText?: string) => void;
   onClose: () => void;
 }) => {
@@ -4613,10 +4885,10 @@ const PageEditorPanel = ({
   );
 
   const [draftTexts, setDraftTexts] = useState<string[]>(shadowTexts);
+  const [isDraftTextDirty, setIsDraftTextDirty] = useState(false);
+  const draftTextsRef = useRef(draftTexts);
   const audioTracks = document.shadowAudio?.tracks ?? EMPTY_AUDIO_TRACKS;
-  const [draftAudioMap, setDraftAudioMap] = useState<
-    Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }>
-  >({});
+  const [draftAudioMap, setDraftAudioMap] = useState<Record<string, DraftAudioMapEntry>>({});
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewCleanupRef = useRef<(() => void) | null>(null);
   const [audioPreviewState, setAudioPreviewState] = useState<{
@@ -4640,8 +4912,11 @@ const PageEditorPanel = ({
   const [pairEditorModeByPage, setPairEditorModeByPage] = useState<Record<number, boolean>>(() =>
     dualTextModeByPage
   );
-  const [isViewManagerCollapsed, setIsViewManagerCollapsed] = useState(false);
   const hasAnyDraftText = draftTexts.some((item) => item.trim().length > 0);
+  const audioSlotEntries = useMemo(
+    () => buildAudioSlotEntries(pageCount, draftTexts, pairEditorModeByPage),
+    [draftTexts, pageCount, pairEditorModeByPage]
+  );
   const spreadPositionByPage = useMemo(() => {
     const next = new Map<number, "left" | "right">();
     views.forEach((view) => {
@@ -4654,8 +4929,31 @@ const PageEditorPanel = ({
   }, [views]);
 
   useEffect(() => {
-    setDraftTexts((current) => (areStringArraysEqual(current, shadowTexts) ? current : shadowTexts));
-  }, [shadowTexts, document.id]);
+    setIsDraftTextDirty(false);
+    setDraftTexts(shadowTexts);
+  }, [document.id]);
+
+  useEffect(() => {
+    draftTextsRef.current = draftTexts;
+  }, [draftTexts]);
+
+  useEffect(() => {
+    setDraftTexts((current) => {
+      if (isDraftTextDirty) return current;
+      return areStringArraysEqual(current, shadowTexts) ? current : shadowTexts;
+    });
+  }, [shadowTexts, document.id, isDraftTextDirty]);
+
+  useEffect(() => {
+    if (!isDraftTextDirty) return undefined;
+    const autoSaveTimer = window.setInterval(() => {
+      onSaveAllPageTexts(draftTextsRef.current, { silent: true });
+      setIsDraftTextDirty(false);
+    }, PAGE_TEXT_AUTO_SAVE_INTERVAL_MS);
+    return () => {
+      window.clearInterval(autoSaveTimer);
+    };
+  }, [isDraftTextDirty, onSaveAllPageTexts]);
 
   useEffect(() => {
     setRematchDiagnostics(null);
@@ -4676,22 +4974,43 @@ const PageEditorPanel = ({
       segmentByKey.set(getAudioSlotKey(segment.pageIndex, segment.slot), segment);
     });
 
-    const nextDraft: Record<string, { trackIndex: number; startSec: string; endSec: string; hasSegment: boolean }> = {};
+    const nextDraft: Record<string, DraftAudioMapEntry> = {};
+    let previousEntryDraft: DraftAudioMapEntry | null = null;
     buildAudioSlotEntries(pageCount, shadowTexts, dualTextModeByPage).forEach((entry) => {
       const fromSegment = segmentByKey.get(getAudioSlotKey(entry.pageIndex, entry.slot));
       const trackIndex = fromSegment?.trackIndex ?? 0;
       const duration = audioTracks[trackIndex]?.durationSec || 0;
       const startSec = fromSegment?.startSec ?? 0;
       const endSec = fromSegment?.endSec ?? startSec;
+      const draftKey = getAudioSlotKey(entry.pageIndex, entry.slot);
 
-      nextDraft[getAudioSlotKey(entry.pageIndex, entry.slot)] = {
-        trackIndex,
-        startSec: Number.isFinite(startSec) ? String(startSec.toFixed(2)) : "0",
-        endSec: Number.isFinite(endSec)
-          ? String(endSec.toFixed(2))
-          : String((duration > 0 ? duration : startSec).toFixed(2)),
-        hasSegment: Boolean(fromSegment),
-      };
+      if (fromSegment) {
+        nextDraft[draftKey] = {
+          trackIndex,
+          startSec: Number.isFinite(startSec) ? String(startSec.toFixed(2)) : "0",
+          endSec: Number.isFinite(endSec)
+            ? String(endSec.toFixed(2))
+            : String((duration > 0 ? duration : startSec).toFixed(2)),
+          hasSegment: true,
+        };
+      } else if (previousEntryDraft?.hasSegment) {
+        const previousTrackIndex = previousEntryDraft.trackIndex;
+        nextDraft[draftKey] = buildAutoNextAudioDraftEntry(
+          previousTrackIndex,
+          Number(previousEntryDraft.endSec || 0),
+          audioTracks[previousTrackIndex]?.durationSec || 0
+        );
+      } else {
+        nextDraft[draftKey] = {
+          trackIndex,
+          startSec: Number.isFinite(startSec) ? String(startSec.toFixed(2)) : "0",
+          endSec: Number.isFinite(endSec)
+            ? String(endSec.toFixed(2))
+            : String((duration > 0 ? duration : startSec).toFixed(2)),
+          hasSegment: false,
+        };
+      }
+      previousEntryDraft = nextDraft[draftKey];
     });
     setDraftAudioMap((current) => (areDraftAudioMapsEqual(current, nextDraft) ? current : nextDraft));
   }, [
@@ -4753,7 +5072,7 @@ const PageEditorPanel = ({
         const leftText = nextSlotValues[cursor] || "";
         const rightText = nextSlotValues[cursor + 1] || "";
         cursor += 2;
-        return joinDualPageText(leftText, rightText);
+        return joinDualPageText(leftText, rightText, { preserveRightSlot: true });
       }
 
       const nextValue = nextSlotValues[cursor] || "";
@@ -4762,6 +5081,7 @@ const PageEditorPanel = ({
     });
 
     setDraftTexts(nextTexts);
+    setIsDraftTextDirty(true);
   };
 
   const stopPreviewAudio = () => {
@@ -4821,6 +5141,49 @@ const PageEditorPanel = ({
       start,
       end,
       hasSegment: Boolean(draft?.hasSegment),
+    };
+  };
+
+  const applyAutoNextAudioStart = (
+    current: Record<string, DraftAudioMapEntry>,
+    pageIndex: number,
+    slot: AudioSegmentSlot,
+    trackIndex: number,
+    previousEndSec: number
+  ) => {
+    const currentEntryIndex = audioSlotEntries.findIndex(
+      (entry) => entry.pageIndex === pageIndex && entry.slot === slot
+    );
+    const nextEntry = currentEntryIndex >= 0 ? audioSlotEntries[currentEntryIndex + 1] : null;
+    if (!nextEntry) return current;
+
+    const nextKey = getAudioSlotKey(nextEntry.pageIndex, nextEntry.slot);
+    const nextDraft = current[nextKey];
+    if (nextDraft?.hasSegment) return current;
+
+    const nextTrackIndex = Math.max(
+      0,
+      Math.min(trackIndex, Math.max(0, audioTracks.length - 1))
+    );
+    const nextAutoDraft = buildAutoNextAudioDraftEntry(
+      nextTrackIndex,
+      previousEndSec,
+      audioTracks[nextTrackIndex]?.durationSec || 0
+    );
+
+    if (
+      nextDraft &&
+      nextDraft.trackIndex === nextAutoDraft.trackIndex &&
+      nextDraft.startSec === nextAutoDraft.startSec &&
+      nextDraft.endSec === nextAutoDraft.endSec &&
+      nextDraft.hasSegment === nextAutoDraft.hasSegment
+    ) {
+      return current;
+    }
+
+    return {
+      ...current,
+      [nextKey]: nextAutoDraft,
     };
   };
 
@@ -5003,6 +5366,7 @@ const PageEditorPanel = ({
 
   const handleSaveAllTexts = () => {
     onSaveAllPageTexts(draftTexts);
+    setIsDraftTextDirty(false);
   };
 
   const handleSaveAllAudio = () => {
@@ -5066,9 +5430,26 @@ const PageEditorPanel = ({
           </p>
           <button
             type="button"
-            onClick={() =>
-              onSaveAudioMapping(pageIndex, slot, trackIndex, start, end)
-            }
+            onClick={() => {
+              onSaveAudioMapping(pageIndex, slot, trackIndex, start, end);
+              setDraftAudioMap((current) =>
+                applyAutoNextAudioStart(
+                  {
+                    ...current,
+                    [slotKey]: {
+                      trackIndex,
+                      startSec: start.toFixed(2),
+                      endSec: end.toFixed(2),
+                      hasSegment: true,
+                    },
+                  },
+                  pageIndex,
+                  slot,
+                  trackIndex,
+                  end
+                )
+              );
+            }}
             className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700"
           >
             {options.saveLabel}
@@ -5133,15 +5514,23 @@ const PageEditorPanel = ({
                 currentStart + 0.05,
                 Math.min(Number(value || 0), duration || Number(value || 0))
               );
-              setDraftAudioMap((current) => ({
-                ...current,
-                [slotKey]: {
+              setDraftAudioMap((current) =>
+                applyAutoNextAudioStart(
+                  {
+                    ...current,
+                    [slotKey]: {
+                      trackIndex,
+                      startSec: currentStart.toFixed(2),
+                      endSec: nextEnd.toFixed(2),
+                      hasSegment: true,
+                    },
+                  },
+                  pageIndex,
+                  slot,
                   trackIndex,
-                  startSec: currentStart.toFixed(2),
-                  endSec: nextEnd.toFixed(2),
-                  hasSegment: true,
-                },
-              }));
+                  nextEnd
+                )
+              );
             }}
             className="rounded-lg border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700 outline-none focus:border-indigo-400"
             placeholder="end"
@@ -5214,15 +5603,21 @@ const PageEditorPanel = ({
                   setDraftAudioMap((current) => {
                     const currentStart = Number(current[slotKey]?.startSec ?? start);
                     const safeEnd = Math.max(currentStart + 0.05, nextEndRaw);
-                    return {
-                      ...current,
-                      [slotKey]: {
-                        trackIndex,
-                        startSec: currentStart.toFixed(2),
-                        endSec: safeEnd.toFixed(2),
-                        hasSegment: true,
+                    return applyAutoNextAudioStart(
+                      {
+                        ...current,
+                        [slotKey]: {
+                          trackIndex,
+                          startSec: currentStart.toFixed(2),
+                          endSec: safeEnd.toFixed(2),
+                          hasSegment: true,
+                        },
                       },
-                    };
+                      pageIndex,
+                      slot,
+                      trackIndex,
+                      safeEnd
+                    );
                   });
                 }}
                 className={`mt-1 w-full ${options.sliderClass}`}
@@ -5330,31 +5725,30 @@ const PageEditorPanel = ({
         </button>
       </div>
 
-      <div
-        className={`grid min-h-0 flex-1 gap-4 overflow-hidden p-4 ${
-          isViewManagerCollapsed
-            ? "grid-cols-1"
-            : "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]"
-        }`}
-      >
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden p-4">
         <section className="min-h-0 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h4 className="text-sm font-black text-slate-900">页面顺序 + 文字 + 图片</h4>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsViewManagerCollapsed((current) => !current)}
-                className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+              <label
+                className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white transition ${
+                  isBatchUploadingImages
+                    ? "cursor-not-allowed bg-slate-300"
+                    : "cursor-pointer bg-amber-500 hover:bg-amber-600"
+                }`}
               >
-                {isViewManagerCollapsed ? "展开右侧管理" : "收起右侧管理"}
-              </button>
-              <button
-                type="button"
-                onClick={onBatchFillImages}
-                className="rounded-full bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-600"
-              >
-                批量填充图片
-              </button>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  disabled={isBatchUploadingImages}
+                  className="sr-only"
+                  onChange={(event) => {
+                    void onBatchFillImages(event);
+                  }}
+                />
+                {isBatchUploadingImages ? "上传中..." : "批量填充图片"}
+              </label>
               <button
                 type="button"
                 onClick={onBatchFillTexts}
@@ -5511,20 +5905,28 @@ const PageEditorPanel = ({
                       >
                         下移
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onInsertPage(pageIndex)}
-                        className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-200"
-                      >
+                      <label className="cursor-pointer rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-200">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="sr-only"
+                          onChange={(event) => {
+                            void onInsertPage(pageIndex, event);
+                          }}
+                        />
                         增加页面
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onReplaceImage(pageIndex)}
-                        className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-200"
-                      >
+                      </label>
+                      <label className="cursor-pointer rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-200">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="sr-only"
+                          onChange={(event) => {
+                            void onReplaceImage(pageIndex, event);
+                          }}
+                        />
                         替换图片
-                      </button>
+                      </label>
                       <button
                         type="button"
                         disabled={pageCount <= 1}
@@ -5592,8 +5994,13 @@ const PageEditorPanel = ({
                             value={leftText}
                             onChange={(event) => {
                               const next = [...draftTexts];
-                              next[pageIndex] = joinDualPageText(event.target.value, rightText);
+                              next[pageIndex] = updateDraftDualPageTextSlot(
+                                draftTexts[pageIndex] || "",
+                                "left",
+                                event.target.value
+                              );
                               setDraftTexts(next);
+                              setIsDraftTextDirty(true);
                             }}
                             rows={4}
                             className="mt-2 w-full rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-sky-400"
@@ -5629,8 +6036,13 @@ const PageEditorPanel = ({
                             value={rightText}
                             onChange={(event) => {
                               const next = [...draftTexts];
-                              next[pageIndex] = joinDualPageText(leftText, event.target.value);
+                              next[pageIndex] = updateDraftDualPageTextSlot(
+                                draftTexts[pageIndex] || "",
+                                "right",
+                                event.target.value
+                              );
                               setDraftTexts(next);
+                              setIsDraftTextDirty(true);
                             }}
                             rows={4}
                             className="mt-2 w-full rounded-xl border border-violet-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-violet-400"
@@ -5649,7 +6061,7 @@ const PageEditorPanel = ({
                               onClick={() => onSavePageText(pageIndex, draftTexts[pageIndex] || "")}
                               className="rounded-full bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-700"
                             >
-                              保存当前页
+                              保存右页
                             </button>
                           </div>
                         </div>
@@ -5662,6 +6074,7 @@ const PageEditorPanel = ({
                             const next = [...draftTexts];
                             next[pageIndex] = event.target.value;
                             setDraftTexts(next);
+                            setIsDraftTextDirty(true);
                           }}
                           rows={3}
                           className={`w-full rounded-xl bg-white px-3 py-2 text-sm text-slate-800 outline-none transition ${
@@ -5749,162 +6162,6 @@ const PageEditorPanel = ({
             ))}
           </div>
         </section>
-
-        {!isViewManagerCollapsed ? (
-        <section className="min-h-0 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <h4 className="text-sm font-black text-slate-900">对页组合管理</h4>
-            <div className="flex items-center gap-2">
-              <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">
-                {views.length} 组
-              </span>
-              <button
-                type="button"
-                onClick={() => setIsViewManagerCollapsed(true)}
-                className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-              >
-                收起
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {views.length ? (
-              views.map((view, viewIndex) => {
-                const canMerge =
-                  view.kind === "single" && views[viewIndex + 1]?.kind === "single";
-                const leftPageIndex =
-                  view.kind === "spread" && typeof view.pages[0] === "number"
-                    ? view.pages[0]
-                    : null;
-                const rightPageIndex =
-                  view.kind === "spread" && typeof view.pages[1] === "number"
-                    ? view.pages[1]
-                    : null;
-
-                return (
-                  <div
-                    key={`${document.id}-view-${viewIndex}`}
-                    className="rounded-2xl border border-slate-200 bg-white p-3"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
-                        组 {viewIndex + 1}
-                      </span>
-                      <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">
-                        {view.kind === "spread" ? "对页" : "单页"}
-                      </span>
-                      <span className="text-xs text-slate-500">
-                        {view.kind === "spread"
-                          ? `L: ${typeof view.pages[0] === "number" ? view.pages[0] + 1 : "Blank"} / R: ${
-                              typeof view.pages[1] === "number" ? view.pages[1] + 1 : "Blank"
-                            }`
-                          : `P: ${view.pages[0] + 1}`}
-                      </span>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {view.kind === "spread" ? (
-                        <button
-                          type="button"
-                          onClick={() => onSplitView(viewIndex)}
-                          className="rounded-full bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-700 transition hover:bg-amber-200"
-                        >
-                          拆成两页
-                        </button>
-                      ) : null}
-
-                      {canMerge ? (
-                        <button
-                          type="button"
-                          onClick={() => onMergeView(viewIndex)}
-                          className="rounded-full bg-emerald-100 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-200"
-                        >
-                          与下一页组为对页
-                        </button>
-                      ) : null}
-                    </div>
-
-                    {view.kind === "spread" && (leftPageIndex !== null || rightPageIndex !== null) ? (
-                      <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                        {leftPageIndex !== null ? (
-                          <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-sky-700">
-                                Left Page
-                              </p>
-                              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-700">
-                                第 {leftPageIndex + 1} 页
-                              </span>
-                            </div>
-                            <textarea
-                              value={draftTexts[leftPageIndex] || ""}
-                              onChange={(event) => {
-                                const next = [...draftTexts];
-                                next[leftPageIndex] = event.target.value;
-                                setDraftTexts(next);
-                              }}
-                              rows={4}
-                              className="mt-2 w-full rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-sky-400"
-                              placeholder="输入左页文字"
-                            />
-                            <div className="mt-2 flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => onSavePageText(leftPageIndex, draftTexts[leftPageIndex] || "")}
-                                className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700"
-                              >
-                                保存左页
-                              </button>
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {rightPageIndex !== null ? (
-                          <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-700">
-                                Right Page
-                              </p>
-                              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-violet-700">
-                                第 {rightPageIndex + 1} 页
-                              </span>
-                            </div>
-                            <textarea
-                              value={draftTexts[rightPageIndex] || ""}
-                              onChange={(event) => {
-                                const next = [...draftTexts];
-                                next[rightPageIndex] = event.target.value;
-                                setDraftTexts(next);
-                              }}
-                              rows={4}
-                              className="mt-2 w-full rounded-xl border border-violet-100 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none transition focus:border-violet-400"
-                              placeholder="输入右页文字"
-                            />
-                            <div className="mt-2 flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => onSavePageText(rightPageIndex, draftTexts[rightPageIndex] || "")}
-                                className="rounded-full bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-700"
-                              >
-                                保存右页
-                              </button>
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })
-            ) : (
-              <div className="rounded-xl bg-white px-4 py-6 text-center text-sm text-slate-500">
-                暂无页面视图可编辑。
-              </div>
-            )}
-          </div>
-        </section>
-        ) : null}
       </div>
     </div>
   );
@@ -7120,9 +7377,10 @@ const StudentShadowSubmissionBoard = ({
                           保存点评
                         </button>
                       </div>
-                    </div>
+	                    </div>
+	                    <VoiceSubtitlePreview voiceSubtitles={submission.voiceSubtitles} />
 
-                    {assessment ? (
+	                    {assessment ? (
                       <div className="mt-4 rounded-[1.1rem] bg-white p-4 shadow-sm">
                         <div className="grid gap-2 sm:grid-cols-5">
                           {[
@@ -7154,6 +7412,156 @@ const StudentShadowSubmissionBoard = ({
                       </div>
                     ) : null}
                   </>
+                ) : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="rounded-[1.1rem] bg-slate-50 px-4 py-4 text-sm text-slate-500">
+            这份绘本还没有发布给学生，或者还没有学生任务记录。
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
+
+const StudentSpeakingSubmissionBoard = ({
+  document,
+}: {
+  document: StoryflowDocument;
+}) => {
+  const [assignments, setAssignments] = useState<StoryflowAssignment[]>([]);
+
+  const refreshAssignments = () => {
+    setAssignments(
+      getTeacherStoryflowAssignments(document.teacherUsername).filter(
+        (item) => item.documentId === document.id
+      )
+    );
+  };
+
+  useEffect(() => {
+    refreshAssignments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [document.id, document.teacherUsername]);
+
+  return (
+    <section className="rounded-[1.6rem] border border-sky-100 bg-white p-5 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-500">
+            Speaking Homework
+          </p>
+          <h4 className="mt-2 text-2xl font-black text-slate-900">学生看图说话 AI 点评</h4>
+          <p className="mt-2 text-sm leading-6 text-slate-500">
+            学生完成看图说话后，AI 会自动生成个人点评并保存到这里。
+          </p>
+        </div>
+        <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">
+          {assignments.filter((item) => item.speakingSubmission?.studentAssessment).length}/
+          {assignments.length} 已点评
+        </span>
+      </div>
+
+      <div className="mt-4 space-y-4">
+        {assignments.length ? (
+          assignments.map((assignment) => {
+            const submission = assignment.speakingSubmission;
+            const assessment =
+              submission?.teacherAssessment || submission?.studentAssessment || null;
+            const record = submission?.latestPracticeRecord || null;
+            const score = assessment
+              ? Math.round(
+                  (assessment.fluency.score +
+                    assessment.pronunciation.score +
+                    assessment.intonation.score +
+                    assessment.vocabulary.score +
+                    assessment.emotion.score) /
+                    5
+                )
+              : null;
+
+            return (
+              <div
+                key={`speaking_submission_${assignment.id}`}
+                className="rounded-[1.35rem] border border-slate-100 bg-slate-50 p-4"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-lg font-bold text-slate-900">
+                        {assignment.studentDisplayName}
+                      </p>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-bold ${
+                          assessment
+                            ? "bg-emerald-100 text-emerald-700"
+                            : submission
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-slate-200 text-slate-600"
+                        }`}
+                      >
+                        {assessment ? "已生成点评" : submission ? "已完成练习" : "未完成"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {submission
+                        ? `完成时间：${formatTime(submission.completedAt)}`
+                        : "学生还没有完成看图说话练习。"}
+                    </p>
+                  </div>
+                  {score !== null ? (
+                    <div className="rounded-[1rem] bg-sky-700 px-4 py-3 text-center text-white">
+                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-white/70">
+                        AI 总评
+                      </p>
+                      <p className="mt-1 text-2xl font-black">{score}</p>
+                    </div>
+                  ) : null}
+                </div>
+
+	                {record ? (
+	                  <>
+	                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold text-slate-600">
+	                      <span className="rounded-full bg-white px-3 py-1.5">
+	                        用时 {formatAudioSeconds(record.durationSec)}
+	                      </span>
+	                      <span className="rounded-full bg-white px-3 py-1.5">
+	                        页数 {record.practicedPages}/{record.totalPages}
+	                      </span>
+	                      <span className="rounded-full bg-white px-3 py-1.5">
+	                        提示 {record.promptRevealCount} 次
+	                      </span>
+	                      <span className="rounded-full bg-white px-3 py-1.5">
+	                        原文 {record.originalRevealCount} 次
+	                      </span>
+	                    </div>
+	                    <VoiceSubtitlePreview voiceSubtitles={record.voiceSubtitles} />
+	                  </>
+	                ) : null}
+
+                {assessment ? (
+                  <div className="mt-4 rounded-[1.1rem] bg-white p-4 shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
+                      AI 点评
+                    </p>
+                    <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">
+                      {assessment.overallComment}
+                    </p>
+                    {assessment.suggestions?.length ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {assessment.suggestions.slice(0, 5).map((suggestion, index) => (
+                          <span
+                            key={`${assignment.id}_speaking_suggestion_${index}`}
+                            className="rounded-full bg-sky-50 px-3 py-1.5 text-xs font-bold text-sky-700"
+                          >
+                            {suggestion}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
             );
@@ -7264,7 +7672,7 @@ const ScoreFeedbackBoard = ({
           </p>
           <h3 className="mt-2 text-2xl font-black text-slate-900">得分点评</h3>
           <p className="mt-2 text-sm leading-6 text-slate-500">
-            这里汇总影子跟读、看图说话、脱稿表演三类评分。老师可以直接修改分数和点评内容。
+            这里汇总影子跟读和看图说话的表现记录。老师可以直接修改分数、问题记录和点评内容。
           </p>
         </div>
         <button
@@ -7276,7 +7684,7 @@ const ScoreFeedbackBoard = ({
         </button>
       </div>
 
-      {(["shadow", "speaking", "performance"] as StoryflowAssessmentKey[]).map((key) => {
+      {(["shadow", "speaking"] as StoryflowAssessmentKey[]).map((key) => {
         const assessment = draftAssessments[key];
         const meta = STORYFLOW_ASSESSMENT_META[key];
         const averageScore = Math.round(
@@ -7391,6 +7799,7 @@ const ScoreFeedbackBoard = ({
       ) : null}
 
       <StudentShadowSubmissionBoard document={document} teacherName={teacherName} />
+      <StudentSpeakingSubmissionBoard document={document} />
     </div>
   );
 };
@@ -7842,9 +8251,10 @@ const SpeakingDeck = ({
                           <th className="px-3 py-2">看提示</th>
                           <th className="px-3 py-2">看原文</th>
                           <th className="px-3 py-2">练习页数</th>
-                          <th className="px-3 py-2">评分</th>
-                          <th className="px-3 py-2">提示英文总结</th>
-                          <th className="px-3 py-2">原文英文总结</th>
+	                          <th className="px-3 py-2">评分</th>
+	                          <th className="px-3 py-2">语音字幕</th>
+	                          <th className="px-3 py-2">提示英文总结</th>
+	                          <th className="px-3 py-2">原文英文总结</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -7864,11 +8274,14 @@ const SpeakingDeck = ({
                             <td className="px-3 py-3">
                               {record.practicedPages}/{record.totalPages}
                             </td>
-                            <td className="px-3 py-3 font-black text-sky-700">
-                              {record.ratingLabel}
-                            </td>
-                            <td className="px-3 py-3 text-xs leading-5 text-slate-600">
-                              {summarizePracticeTexts(record.promptViewedTexts)}
+	                            <td className="px-3 py-3 font-black text-sky-700">
+	                              {record.ratingLabel}
+	                            </td>
+	                            <td className="px-3 py-3 text-xs leading-5 text-slate-600">
+	                              {formatVoiceSubtitleSummary(record.voiceSubtitles)}
+	                            </td>
+	                            <td className="px-3 py-3 text-xs leading-5 text-slate-600">
+	                              {summarizePracticeTexts(record.promptViewedTexts)}
                             </td>
                             <td className="rounded-r-[1rem] px-3 py-3 text-xs leading-5 text-slate-600">
                               {summarizePracticeTexts(record.originalViewedTexts)}
@@ -7998,12 +8411,10 @@ const parseCustomViews = (
 
 const getEffectiveShadowViews = (document: StoryflowDocument): ShadowView[] => {
   const totalPages = document.pageObjectKeys?.length || document.pageCount || 0;
-  const isPdfDocument = (document.sourceAssets || []).some(
-    (asset) => asset.mimeType === "application/pdf"
-  );
-  const custom = parseCustomViews(document.customShadowViews, totalPages);
-  if (custom.length) return custom;
-  return buildShadowViews(totalPages, isPdfDocument);
+  return Array.from({ length: totalPages }, (_, pageIndex) => ({
+    kind: "single" as const,
+    pages: [pageIndex] as [number],
+  }));
 };
 
 const ShadowReader = forwardRef<ShadowReaderHandle, {
@@ -8031,6 +8442,10 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
     () => buildResolvedShadowTexts(document.analysis, totalPages),
     [document.analysis, totalPages]
   );
+  const pairEditorModeByPage = useMemo(
+    () => buildPairEditorModeByPage(document, totalPages),
+    [document, totalPages]
+  );
   const navigationSteps = useMemo(
     () =>
       views.flatMap((item, index) => {
@@ -8041,12 +8456,16 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
             pageIndex,
             shadowTexts[pageIndex] || ""
           );
-          const { leftText, rightText } = splitDualPageText(pageText);
-          if (leftText && rightText) {
-            return [
-              { viewIndex: index, focus: 0 as const, pageIndex },
-              { viewIndex: index, focus: 1 as const, pageIndex },
-            ];
+          const isPairMode = Boolean(pairEditorModeByPage[pageIndex]);
+          const { leftText, rightText } = splitShadowPageTextByMode(pageText, isPairMode);
+          if (isPairMode) {
+            const steps = [
+              leftText.trim() ? { viewIndex: index, focus: 0 as const, pageIndex } : null,
+              rightText.trim() ? { viewIndex: index, focus: 1 as const, pageIndex } : null,
+            ].filter((step): step is { viewIndex: number; focus: 0 | 1; pageIndex: number } =>
+              Boolean(step)
+            );
+            if (steps.length) return steps;
           }
           return [{ viewIndex: index, focus: 0 as const, pageIndex }];
         }
@@ -8091,7 +8510,7 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
 
         return steps;
       }),
-    [document.analysis.title, shadowTexts, views]
+    [document.analysis.title, pairEditorModeByPage, shadowTexts, views]
   );
   const findStepIndexForView = (targetViewIndex: number, preferredFocus: 0 | 1 = 0) => {
     if (!navigationSteps.length) return 0;
@@ -8129,9 +8548,14 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
           shadowTexts[activeView.pages[0]] || ""
         )
       : "";
-  const singlePageTextParts = splitDualPageText(singlePageText);
+  const singlePageIsPairMode =
+    activeView.kind === "single" &&
+    typeof activeView.pages[0] === "number" &&
+    Boolean(pairEditorModeByPage[activeView.pages[0]]);
+  const singlePageTextParts = splitShadowPageTextByMode(singlePageText, singlePageIsPairMode);
   const isSingleDualTextView =
     activeView.kind === "single" &&
+    singlePageIsPairMode &&
     Boolean(singlePageTextParts.leftText.trim() && singlePageTextParts.rightText.trim());
   const rightPageIndex =
     activeView.kind === "spread"
@@ -8302,11 +8726,12 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
               step.pageIndex,
               shadowTexts[step.pageIndex] || ""
             ),
-            step.focus
+            step.focus,
+            Boolean(pairEditorModeByPage[step.pageIndex])
           ).trim()
         )
       ),
-    [document.analysis.title, navigationSteps, shadowTexts]
+    [document.analysis.title, navigationSteps, pairEditorModeByPage, shadowTexts]
   );
   const currentRecordingStepKey = currentStep ? buildRecordingStepKey(currentStep) : activeKey;
   const recordedStepCount = recordableSteps.filter(
@@ -8575,7 +9000,8 @@ const ShadowReader = forwardRef<ShadowReaderHandle, {
               step.pageIndex,
               shadowTexts[step.pageIndex] || ""
             ),
-            step.focus
+            step.focus,
+            Boolean(pairEditorModeByPage[step.pageIndex])
           ).trim()
         )
         .filter(Boolean)
@@ -9310,6 +9736,261 @@ const buildMindMapBranches = (document: StoryflowDocument) => {
       boxClass: tone.boxClass,
     };
   });
+};
+
+const formatAnimationDuration = (durationSec?: number) => {
+  const seconds = Math.max(0, Math.round(durationSec || 0));
+  if (!seconds) return "未知时长";
+  const minutes = Math.floor(seconds / 60);
+  const remain = seconds % 60;
+  return minutes ? `${minutes}分${remain.toString().padStart(2, "0")}秒` : `${remain}秒`;
+};
+
+const getStoryflowAnimationList = (document: StoryflowDocument) =>
+  (document.aiAnimations?.length
+    ? document.aiAnimations
+    : document.aiAnimation
+      ? [document.aiAnimation]
+      : []
+  ).slice(0, 2);
+
+const AiAnimationStudio = ({
+  document,
+  getVideoUrl,
+  videoInputRef,
+  onRemoveVideo,
+}: {
+  document: StoryflowDocument;
+  getVideoUrl: (animation: StoryflowAiAnimation) => string;
+  videoInputRef: React.RefObject<HTMLInputElement | null>;
+  onRemoveVideo: (animationIndex: number) => void;
+}) => {
+  const animations = getStoryflowAnimationList(document);
+  const canUploadMore = animations.length < 2;
+
+  return (
+    <section className="overflow-hidden rounded-[1.8rem] border border-sky-100 bg-[linear-gradient(135deg,rgba(240,249,255,0.98),rgba(255,255,255,0.96)_48%,rgba(238,242,255,0.94))] p-5 shadow-[0_22px_60px_rgba(56,189,248,0.12)]">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-xs font-black uppercase tracking-[0.24em] text-sky-500">
+            Animation Reading
+          </p>
+          <h3 className="mt-2 text-2xl font-black text-slate-900">动画伴读</h3>
+          <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-500">
+            上传老师端准备好的绘本动画片，最多 2 个。发布任务后，学生端点击“动画伴读”即可观看。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {canUploadMore ? (
+            <button
+              type="button"
+              onClick={() => videoInputRef.current?.click()}
+              className="rounded-full bg-sky-600 px-5 py-2.5 text-sm font-black text-white shadow-[0_12px_26px_rgba(14,165,233,0.22)] transition hover:bg-sky-700"
+            >
+              {animations.length ? "添加第二个动画" : "上传动画"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-5">
+        {animations.length ? (
+          <div className="grid gap-4 lg:grid-cols-2">
+            {animations.map((animation, index) => {
+              const videoUrl = getVideoUrl(animation);
+              return (
+                <article
+                  key={animation.objectKey}
+                  className="overflow-hidden rounded-[1.45rem] bg-slate-950 shadow-[0_24px_70px_rgba(15,23,42,0.2)]"
+                >
+                  {videoUrl ? (
+                    <video
+                      src={videoUrl}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="aspect-video w-full bg-black object-contain"
+                    />
+                  ) : (
+                    <div className="grid aspect-video place-items-center px-4 text-center text-sm font-bold text-sky-100">
+                      视频地址加载中...
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-3 bg-white px-4 py-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-black text-slate-900">
+                        动画 {index + 1} · {animation.fileName}
+                      </p>
+                      <p className="mt-1 text-xs font-bold text-slate-400">
+                        {formatAnimationDuration(animation.durationSec)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveVideo(index)}
+                      className="shrink-0 rounded-full bg-rose-50 px-3 py-1.5 text-xs font-black text-rose-600 ring-1 ring-rose-100 transition hover:bg-rose-100"
+                    >
+                      移除
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => videoInputRef.current?.click()}
+            className="grid aspect-video w-full place-items-center overflow-hidden rounded-[1.6rem] bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.24),rgba(15,23,42,1)_58%)] px-6 text-center shadow-[0_24px_70px_rgba(15,23,42,0.2)]"
+          >
+            <div>
+              <div className="mx-auto grid h-16 w-16 place-items-center rounded-[1.4rem] bg-white/10 text-3xl text-white">
+                ▶
+              </div>
+              <p className="mt-4 text-xl font-black text-white">还没有上传动画伴读</p>
+              <p className="mt-2 text-sm leading-6 text-sky-100/80">
+                点击这里上传视频，支持 mp4、mov、webm。
+              </p>
+            </div>
+          </button>
+        )}
+      </div>
+
+      {animations.length ? (
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <div className="rounded-[1.2rem] bg-white/78 px-4 py-3 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              数量
+            </p>
+            <p className="mt-2 text-sm font-bold text-slate-800">{animations.length} / 2 个</p>
+          </div>
+          <div className="rounded-[1.2rem] bg-white/78 px-4 py-3 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              总时长
+            </p>
+            <p className="mt-2 text-sm font-bold text-slate-800">
+              {formatAnimationDuration(
+                animations.reduce((total, animation) => total + (animation.durationSec || 0), 0)
+              )}
+            </p>
+          </div>
+          <div className="rounded-[1.2rem] bg-white/78 px-4 py-3 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              学生端
+            </p>
+            <p className="mt-2 text-sm font-bold text-emerald-600">已同步到动画伴读任务</p>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+};
+
+const IntensiveReadingStudio = ({ document }: { document: StoryflowDocument }) => {
+  const totalPages = Math.max(
+    document.pageObjectKeys?.length || 0,
+    document.pageCount || 0,
+    document.analysis.shadowPageTexts?.length || 0,
+    document.analysis.pages?.length || 0
+  );
+  const recognizedTextCount = (document.analysis.shadowPageTexts || []).filter((text) =>
+    text.trim()
+  ).length;
+  const previewTexts = (document.analysis.shadowPageTexts || [])
+    .map((text, index) => ({ index, text: text.trim() }))
+    .filter((item) => item.text)
+    .slice(0, 4);
+
+  return (
+    <section className="rounded-[1.8rem] border border-cyan-100 bg-[linear-gradient(135deg,rgba(236,254,255,0.98),rgba(255,255,255,0.96)_52%,rgba(239,246,255,0.96))] p-5 shadow-[0_22px_60px_rgba(14,165,233,0.12)]">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="text-xs font-black uppercase tracking-[0.24em] text-cyan-500">
+            Intensive Reading
+          </p>
+          <h3 className="mt-2 text-2xl font-black text-slate-900">绘本精讲</h3>
+          <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-500">
+            老师上传并发布资料后，学生进入“绘本精讲”，AI 会看当前页画面和可信原文，按页码顺序逐页讲解、提问和巩固。
+          </p>
+        </div>
+        <span className="rounded-full bg-cyan-600 px-4 py-2 text-xs font-black text-white shadow-[0_12px_26px_rgba(8,145,178,0.2)]">
+          发布后学生端可用
+        </span>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-3">
+        <div className="rounded-[1.2rem] bg-white/82 px-4 py-3 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+            资料页数
+          </p>
+          <p className="mt-2 text-sm font-bold text-slate-800">{totalPages || "待识别"} 页</p>
+        </div>
+        <div className="rounded-[1.2rem] bg-white/82 px-4 py-3 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+            原文状态
+          </p>
+          <p className="mt-2 text-sm font-bold text-cyan-700">
+            已识别 {recognizedTextCount} 页
+          </p>
+        </div>
+        <div className="rounded-[1.2rem] bg-white/82 px-4 py-3 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+            学生端
+          </p>
+          <p className="mt-2 text-sm font-bold text-emerald-600">已同步到绘本精讲任务</p>
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-[1.45rem] border border-cyan-100 bg-white/86 p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-400">
+              Intensive Guide
+            </p>
+            <h4 className="mt-2 text-lg font-black text-slate-900">精讲规则</h4>
+          </div>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">
+            RTC 实时语音 + 当前页识别
+          </span>
+        </div>
+        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          {[
+            "按当前页页码顺序推进，双页先左后右。",
+            "完整覆盖当前页可信原文，不提前编下一页。",
+            "每页拆成小步讲解，每一步都留一次学生互动。",
+          ].map((rule) => (
+            <div
+              key={rule}
+              className="rounded-[1.15rem] border border-sky-100 bg-sky-50/70 px-4 py-3 text-sm font-semibold leading-6 text-slate-700"
+            >
+              {rule}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-[1.45rem] border border-slate-100 bg-white/86 p-4 shadow-sm">
+        <p className="text-sm font-black text-slate-900">原文预览</p>
+        {previewTexts.length ? (
+          <div className="mt-3 space-y-2">
+            {previewTexts.map((item) => (
+              <div
+                key={`intensive-preview-${item.index}`}
+                className="rounded-[1rem] bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600"
+              >
+                <span className="font-black text-cyan-700">第 {item.index + 1} 页：</span>
+                {item.text}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 rounded-[1rem] bg-slate-50 px-4 py-3 text-sm text-slate-500">
+            暂无已识别原文。学生端仍会基于老师上传的当前页图片进行精讲，但建议补齐文字以减少误读。
+          </p>
+        )}
+      </div>
+    </section>
+  );
 };
 
 const MindMapBoard = ({ document }: { document: StoryflowDocument }) => {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createSignedDownloadUrl } from "@/lib/cos";
 import { analyzeStoryImages, ocrStoryPageTexts } from "@/lib/storyflowAi";
+import { hasVisionChatProvider } from "@/lib/storyflowVisionClient";
 import type { StoryflowAnalysis, StoryflowPageAnalysis } from "@/lib/storyflowStore";
 
 export const runtime = "nodejs";
@@ -339,8 +340,10 @@ export async function POST(request: Request) {
     const normalizedTexts = Array.from({ length: totalPages }, (_, index) =>
       providedShadowPageTexts[index] || ""
     );
+    const analysisWarnings: string[] = [];
+    const canUseVisionAnalysis = hasVisionChatProvider();
 
-    if (images.length) {
+    if (images.length && canUseVisionAnalysis) {
       try {
         const missingTextIndexes = normalizedTexts
           .map((text, index) => ({ text: text.trim(), index }))
@@ -364,6 +367,9 @@ export async function POST(request: Request) {
         });
       } catch (ocrError) {
         console.warn("Storyflow OCR fallback failed:", ocrError);
+        analysisWarnings.push(
+          `OCR视觉识别失败：${ocrError instanceof Error ? ocrError.message : "unknown error"}`
+        );
       }
     }
 
@@ -376,7 +382,7 @@ export async function POST(request: Request) {
       mergedTexts
     );
     let aiResult: StoryflowAnalysis | null = null;
-    if (images.length) {
+    if (images.length && canUseVisionAnalysis) {
       try {
         aiResult = await withTimeout(
           analyzeStoryImages(images, sourceName, previewImages),
@@ -384,6 +390,9 @@ export async function POST(request: Request) {
         );
       } catch (aiError) {
         console.warn("Storyflow full analysis fallback to rule-based:", aiError);
+        analysisWarnings.push(
+          `整本视觉分析失败：${aiError instanceof Error ? aiError.message : "unknown error"}`
+        );
       }
     }
 
@@ -460,7 +469,10 @@ export async function POST(request: Request) {
         aiResult?.teacherGuide?.length ? aiResult.teacherGuide : fallbackResult.teacherGuide,
     };
 
-    return NextResponse.json(result);
+    return NextResponse.json({
+      ...result,
+      analysisWarnings,
+    });
   } catch (error) {
     console.error("Storyflow analyze route error:", error);
     const message = error instanceof Error ? error.message : "绘本分析失败";

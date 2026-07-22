@@ -6,6 +6,7 @@ import {
   persistStoryflowDocumentOrder,
   persistStoryflowFolder,
   persistStoryflowFolderOrder,
+  replaceTeacherStoryflowSettings,
   removeStoryflowDocument,
   removeStoryflowFolder,
   replaceStoryflowDocument,
@@ -68,6 +69,14 @@ export interface StoryflowAudioMapping {
   pageSegments: StoryflowPageAudioSegment[];
 }
 
+export interface StoryflowAiAnimation {
+  fileName: string;
+  mimeType: string;
+  objectKey: string;
+  durationSec?: number;
+  uploadedAt: number;
+}
+
 export interface StoryflowCustomView {
   kind: "single" | "spread";
   pages: Array<number | null>;
@@ -77,6 +86,13 @@ export interface StoryflowTaskAssessments {
   shadow?: AnalysisResult;
   speaking?: AnalysisResult;
   performance?: AnalysisResult;
+}
+
+export interface StoryflowVoiceSubtitleRecord {
+  id: string;
+  role: "student" | "coach";
+  text: string;
+  createdAt: number;
 }
 
 export interface StoryflowSpeakingPracticeRecord {
@@ -97,6 +113,7 @@ export interface StoryflowSpeakingPracticeRecord {
     pageIndex: number;
     text: string;
   }>;
+  voiceSubtitles?: StoryflowVoiceSubtitleRecord[];
 }
 
 export type StoryflowPerformanceSectionKey =
@@ -124,7 +141,17 @@ export interface StoryflowFolder {
   teacherUsername: string;
   name: string;
   createdAt: number;
+  coverImage?: string;
+  coverObjectKey?: string;
   sortOrder?: number;
+}
+
+export type StoryflowStudentTaskDisplayMode = "folderCovers" | "folderPreview";
+
+export interface StoryflowTeacherSettings {
+  teacherUsername: string;
+  studentTaskDisplayMode: StoryflowStudentTaskDisplayMode;
+  updatedAt: number;
 }
 
 export interface StoryflowDocument {
@@ -148,6 +175,8 @@ export interface StoryflowDocument {
   }>;
   customShadowViews?: StoryflowCustomView[];
   shadowAudio?: StoryflowAudioMapping;
+  aiAnimations?: StoryflowAiAnimation[];
+  aiAnimation?: StoryflowAiAnimation | null;
   assessments?: StoryflowTaskAssessments;
   speakingPracticeRecords?: StoryflowSpeakingPracticeRecord[];
   performanceConfig?: StoryflowPerformanceConfig;
@@ -204,7 +233,26 @@ const normalizePracticeTextEntries = (
     );
 };
 
-const normalizeSpeakingPracticeRecords = (value: unknown) => {
+export const normalizeStoryflowVoiceSubtitles = (value: unknown): StoryflowVoiceSubtitleRecord[] => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const current = item as Partial<StoryflowVoiceSubtitleRecord>;
+      const id = typeof current.id === "string" && current.id.trim() ? current.id.trim() : "";
+      const role = current.role === "student" || current.role === "coach" ? current.role : null;
+      const text = typeof current.text === "string" ? current.text.replace(/\s+/g, " ").trim() : "";
+      const createdAt = toFiniteNumber(current.createdAt, Date.now());
+      if (!id || !role || !text) return null;
+      return { id, role, text, createdAt } satisfies StoryflowVoiceSubtitleRecord;
+    })
+    .filter((item): item is StoryflowVoiceSubtitleRecord => Boolean(item))
+    .sort((left, right) => left.createdAt - right.createdAt)
+    .slice(-80);
+};
+
+const normalizeSpeakingPracticeRecords = (value: unknown): StoryflowSpeakingPracticeRecord[] => {
   if (!Array.isArray(value)) return [];
 
   return value
@@ -230,9 +278,10 @@ const normalizeSpeakingPracticeRecords = (value: unknown) => {
             : "待评定",
         promptViewedTexts: normalizePracticeTextEntries(current.promptViewedTexts),
         originalViewedTexts: normalizePracticeTextEntries(current.originalViewedTexts),
+        voiceSubtitles: normalizeStoryflowVoiceSubtitles(current.voiceSubtitles),
       } satisfies StoryflowSpeakingPracticeRecord;
     })
-    .filter((item): item is StoryflowSpeakingPracticeRecord => Boolean(item))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
     .sort((left, right) => right.createdAt - left.createdAt);
 };
 
@@ -585,6 +634,35 @@ export const normalizeStoryflowDocument = (
             : [],
         }
       : undefined;
+  const normalizeAnimation = (value: unknown): StoryflowAiAnimation | null => {
+    if (!value || typeof value !== "object") return null;
+    const animation = value as Partial<StoryflowAiAnimation>;
+    if (typeof animation.objectKey !== "string" || !animation.objectKey.trim()) return null;
+    return {
+      fileName:
+        typeof animation.fileName === "string" && animation.fileName.trim()
+          ? animation.fileName.trim()
+          : "animation-reading.mp4",
+      mimeType:
+        typeof animation.mimeType === "string" && animation.mimeType.trim()
+          ? animation.mimeType.trim()
+          : "video/mp4",
+      objectKey: animation.objectKey.trim(),
+      durationSec: Math.max(0, toFiniteNumber(animation.durationSec, 0)),
+      uploadedAt: toFiniteNumber(animation.uploadedAt, updatedAt),
+    };
+  };
+  const aiAnimations = (
+    Array.isArray(item.aiAnimations)
+      ? item.aiAnimations
+      : item.aiAnimation
+        ? [item.aiAnimation]
+        : []
+  )
+    .map((animation) => normalizeAnimation(animation))
+    .filter((animation): animation is StoryflowAiAnimation => Boolean(animation))
+    .slice(0, 2);
+  const aiAnimation = aiAnimations[0] || null;
 
   return {
     ...item,
@@ -608,6 +686,8 @@ export const normalizeStoryflowDocument = (
     pageCount,
     customShadowViews: normalizeCustomShadowViews(item.customShadowViews, pageCount),
     shadowAudio,
+    aiAnimations,
+    aiAnimation,
     pairEditorModePages,
     speakingPracticeRecords: normalizeSpeakingPracticeRecords(item.speakingPracticeRecords),
     performanceConfig: normalizeStoryflowPerformanceConfig(item.performanceConfig, normalizedAnalysis),
@@ -637,12 +717,47 @@ export const normalizeStoryflowFolder = (
     teacherUsername,
     name,
     createdAt,
+    coverImage:
+      typeof item.coverImage === "string" && item.coverImage.trim()
+        ? item.coverImage.trim()
+        : "",
+    coverObjectKey:
+      typeof item.coverObjectKey === "string" && item.coverObjectKey.trim()
+        ? item.coverObjectKey.trim()
+        : "",
     sortOrder: toFiniteNumber(item.sortOrder, fallbackOrder || createdAt),
+  };
+};
+
+const normalizeStudentTaskDisplayMode = (
+  value: unknown
+): StoryflowStudentTaskDisplayMode =>
+  value === "folderCovers" ? "folderCovers" : "folderPreview";
+
+export const normalizeStoryflowTeacherSettings = (
+  value: unknown,
+  fallbackTeacherUsername = ""
+): StoryflowTeacherSettings | null => {
+  const item =
+    value && typeof value === "object"
+      ? (value as Partial<StoryflowTeacherSettings>)
+      : {};
+  const teacherUsername =
+    normalizeTeacherUsername(item.teacherUsername) ||
+    normalizeTeacherUsername(fallbackTeacherUsername);
+
+  if (!teacherUsername) return null;
+
+  return {
+    teacherUsername,
+    studentTaskDisplayMode: normalizeStudentTaskDisplayMode(item.studentTaskDisplayMode),
+    updatedAt: toFiniteNumber(item.updatedAt, Date.now()),
   };
 };
 
 let cachedDocuments: StoryflowDocument[] = [];
 let cachedFolders: StoryflowFolder[] = [];
+let cachedTeacherSettings: StoryflowTeacherSettings[] = [];
 let persistQueue: Promise<void> = Promise.resolve();
 const hydratedAccessibleDocumentsAt = new Map<string, number>();
 const inFlightAccessibleDocumentRequests = new Map<
@@ -666,6 +781,12 @@ const setDocumentsCache = (documents: StoryflowDocument[]) => {
 
 const setFoldersCache = (folders: StoryflowFolder[]) => {
   cachedFolders = normalizeFolders(folders);
+};
+
+const setTeacherSettingsCache = (settings: StoryflowTeacherSettings[]) => {
+  cachedTeacherSettings = settings
+    .map((item) => normalizeStoryflowTeacherSettings(item))
+    .filter((item): item is StoryflowTeacherSettings => Boolean(item));
 };
 
 const hasFreshAccessibleDocuments = (teacherUsername: string) => {
@@ -701,6 +822,10 @@ export const hydrateTeacherStoryflowLibrary = async (teacherUsername: string) =>
   setFoldersCache([
     ...cachedFolders.filter((item) => item.teacherUsername !== normalized),
     ...library.folders,
+  ]);
+  setTeacherSettingsCache([
+    ...cachedTeacherSettings.filter((item) => item.teacherUsername !== normalized),
+    library.settings,
   ]);
   return library;
 };
@@ -821,6 +946,23 @@ export const getTeacherStoryflowFolders = (
     });
 };
 
+export const getTeacherStoryflowSettings = (
+  teacherUsername: string
+): StoryflowTeacherSettings => {
+  const normalized = teacherUsername.trim();
+  const existing = cachedTeacherSettings.find(
+    (item) => item.teacherUsername === normalized
+  );
+  return (
+    existing ||
+    ({
+      teacherUsername: normalized,
+      studentTaskDisplayMode: "folderPreview",
+      updatedAt: Date.now(),
+    } satisfies StoryflowTeacherSettings)
+  );
+};
+
 export const saveTeacherStoryflowDocument = (
   teacherUsername: string,
   payload: {
@@ -835,13 +977,24 @@ export const saveTeacherStoryflowDocument = (
       objectKey: string;
     }>;
     shadowAudio?: StoryflowAudioMapping;
+    aiAnimations?: StoryflowAiAnimation[];
+    aiAnimation?: StoryflowAiAnimation | null;
     assessments?: StoryflowTaskAssessments;
     performanceConfig?: StoryflowPerformanceConfig;
+    pairEditorModePages?: number[];
     analysis: StoryflowAnalysis;
   }
 ): StoryflowDocument => {
   const normalized = teacherUsername.trim();
   const timestamp = Date.now();
+  const inferredPairEditorModePages = Array.from(
+    { length: payload.pageObjectKeys?.length || payload.images?.length || payload.analysis.shadowPageTexts?.length || 0 },
+    (_, pageIndex) => pageIndex
+  ).filter((pageIndex) => {
+    if (payload.pairEditorModePages?.includes(pageIndex)) return true;
+    const text = payload.analysis.shadowPageTexts?.[pageIndex] || "";
+    return /\[RIGHT_PAGE\]/i.test(text) || /[／/]/.test(text);
+  });
   const document: StoryflowDocument = {
     id: `story_${timestamp}_${Math.random().toString(36).slice(2, 8)}`,
     teacherUsername: normalized,
@@ -859,11 +1012,14 @@ export const saveTeacherStoryflowDocument = (
     sourceAssets: payload.sourceAssets || [],
     customShadowViews: undefined,
     shadowAudio: payload.shadowAudio,
+    aiAnimations: (payload.aiAnimations || (payload.aiAnimation ? [payload.aiAnimation] : [])).slice(0, 2),
+    aiAnimation: payload.aiAnimation || payload.aiAnimations?.[0] || null,
     assessments: payload.assessments,
     performanceConfig: normalizeStoryflowPerformanceConfig(
       payload.performanceConfig,
       payload.analysis
     ),
+    pairEditorModePages: inferredPairEditorModePages,
     analysis: payload.analysis,
   };
 
@@ -1019,6 +1175,14 @@ export const updateTeacherStoryflowFolder = (
       teacherUsername: item.teacherUsername,
       createdAt: item.createdAt,
       name: updated.name.trim() || item.name,
+      coverImage:
+        typeof updated.coverImage === "string" && updated.coverImage.trim()
+          ? updated.coverImage.trim()
+          : "",
+      coverObjectKey:
+        typeof updated.coverObjectKey === "string" && updated.coverObjectKey.trim()
+          ? updated.coverObjectKey.trim()
+          : "",
       sortOrder: toFiniteNumber(updated.sortOrder, getFolderSortValue(item)),
     };
     return updatedFolder;
@@ -1089,4 +1253,28 @@ export const reorderTeacherStoryflowFolders = (
     await persistStoryflowFolderOrder(normalized, nextOrder);
   });
   return getTeacherStoryflowFolders(normalized);
+};
+
+export const updateTeacherStoryflowSettings = (
+  teacherUsername: string,
+  studentTaskDisplayMode: StoryflowStudentTaskDisplayMode
+): StoryflowTeacherSettings | null => {
+  const normalized = teacherUsername.trim();
+  if (!normalized) return null;
+
+  const settings = normalizeStoryflowTeacherSettings({
+    teacherUsername: normalized,
+    studentTaskDisplayMode,
+    updatedAt: Date.now(),
+  });
+  if (!settings) return null;
+
+  setTeacherSettingsCache([
+    settings,
+    ...cachedTeacherSettings.filter((item) => item.teacherUsername !== normalized),
+  ]);
+  void queuePersist(async () => {
+    await replaceTeacherStoryflowSettings(settings);
+  });
+  return settings;
 };

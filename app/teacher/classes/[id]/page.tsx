@@ -16,11 +16,24 @@ import {
   classWorkspaceNav,
   getClassCapacityLabel,
   getClassCoverTheme,
-  getClassMaterials,
   getLeaderboardMetric,
   getScheduleDays,
   type ClassWorkspaceView,
 } from "@/lib/classPortal";
+import {
+  DEFAULT_STORYFLOW_ASSIGNMENT_MODULES,
+  getTeacherStoryflowAssignments,
+  hydrateTeacherStoryflowAssignments,
+  publishStoryflowAssignments,
+  type StoryflowAssignment,
+} from "@/lib/storyflowAssignments";
+import {
+  getTeacherStoryflowDocuments,
+  getTeacherStoryflowFolders,
+  hydrateTeacherStoryflowLibrary,
+  type StoryflowDocument,
+  type StoryflowFolder,
+} from "@/lib/storyflowStore";
 import {
   bootstrapPortalFromLocal,
   getTeacherClassById,
@@ -40,6 +53,13 @@ interface TaskEntry {
   student: AppUser;
   record: UserAnalysisRecord;
   score: number;
+}
+
+interface CourseLevelCard {
+  folder: StoryflowFolder;
+  documents: StoryflowDocument[];
+  assignedCount: number;
+  colorClass: string;
 }
 
 const formatDate = (value?: number | null) =>
@@ -85,6 +105,15 @@ const chipButtonClass =
 const secondaryActionClass =
   "rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-3 text-base font-black text-white shadow-lg shadow-sky-300/20 transition hover:translate-y-[-1px]";
 
+const courseLevelColorClasses = [
+  "from-sky-500 via-cyan-400 to-blue-500",
+  "from-emerald-500 via-lime-400 to-teal-300",
+  "from-violet-500 via-fuchsia-400 to-pink-300",
+  "from-amber-500 via-orange-400 to-yellow-300",
+  "from-indigo-500 via-blue-400 to-sky-300",
+  "from-rose-500 via-orange-400 to-amber-300",
+];
+
 function TeacherClassDetailContent() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -93,6 +122,9 @@ function TeacherClassDetailContent() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [classInfo, setClassInfo] = useState<TeacherClass | null>(null);
   const [students, setStudents] = useState<AppUser[]>([]);
+  const [storyflowDocuments, setStoryflowDocuments] = useState<StoryflowDocument[]>([]);
+  const [storyflowFolders, setStoryflowFolders] = useState<StoryflowFolder[]>([]);
+  const [storyflowAssignments, setStoryflowAssignments] = useState<StoryflowAssignment[]>([]);
   const [recordsByUsername, setRecordsByUsername] = useState<
     Record<string, UserAnalysisRecord[]>
   >({});
@@ -106,6 +138,12 @@ function TeacherClassDetailContent() {
   const [rankingPanel, setRankingPanel] = useState<RankingPanel>("star");
   const [memberKeyword, setMemberKeyword] = useState("");
   const [taskKeyword, setTaskKeyword] = useState("");
+  const [materialKeyword, setMaterialKeyword] = useState("");
+  const [materialNotice, setMaterialNotice] = useState("");
+  const [materialError, setMaterialError] = useState("");
+  const [coursePublishingFolderId, setCoursePublishingFolderId] = useState<string | null>(null);
+  const [coursePublishFolderId, setCoursePublishFolderId] = useState<string | null>(null);
+  const [selectedCourseStudentIds, setSelectedCourseStudentIds] = useState<string[]>([]);
   const [materialMenuOpen, setMaterialMenuOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -127,6 +165,10 @@ function TeacherClassDetailContent() {
           getTeacherClassById(current.username, classId),
           getTeacherStudents(current.username),
         ]);
+        await Promise.all([
+          hydrateTeacherStoryflowLibrary(current.username),
+          hydrateTeacherStoryflowAssignments(current.username),
+        ]);
         const recordLists = await Promise.all(
           nextStudents.map((student) => getUserRecords(student.username))
         );
@@ -135,6 +177,9 @@ function TeacherClassDetailContent() {
 
         setClassInfo(nextClassInfo);
         setStudents(nextStudents);
+        setStoryflowDocuments(getTeacherStoryflowDocuments(current.username));
+        setStoryflowFolders(getTeacherStoryflowFolders(current.username));
+        setStoryflowAssignments(getTeacherStoryflowAssignments(current.username));
         setRecordsByUsername(
           Object.fromEntries(
             nextStudents.map((student, index) => [
@@ -294,10 +339,115 @@ function TeacherClassDetailContent() {
     return { active, expired, neverLogged };
   }, [currentStudents]);
 
+  const courseLevelCards = useMemo<CourseLevelCard[]>(() => {
+    const assignedPairs = new Set(
+      storyflowAssignments
+        .filter((item) =>
+          currentStudents.some((student) => student.username === item.studentUsername)
+        )
+        .map((item) => `${item.studentUsername}:${item.documentId}`)
+    );
+    const keyword = materialKeyword.trim().toLowerCase();
+
+    return storyflowFolders
+      .map((folder, index) => {
+        const documents = storyflowDocuments.filter((document) => document.folderId === folder.id);
+        const assignedCount = documents.reduce((sum, document) => {
+          return (
+            sum +
+            currentStudents.filter((student) =>
+              assignedPairs.has(`${student.username}:${document.id}`)
+            ).length
+          );
+        }, 0);
+
+        return {
+          folder,
+          documents,
+          assignedCount,
+          colorClass: courseLevelColorClasses[index % courseLevelColorClasses.length],
+        };
+      })
+      .filter((item) => {
+        if (!keyword) return true;
+        const haystack = [
+          item.folder.name,
+          ...item.documents.map((document) => document.analysis.title || document.sourceName),
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(keyword);
+      });
+  }, [currentStudents, materialKeyword, storyflowAssignments, storyflowDocuments, storyflowFolders]);
+
   const setView = (view: ClassWorkspaceView) => {
     const params = new URLSearchParams(searchParams.toString());
     params.set("view", view);
     router.replace(`/teacher/classes/${classId}?${params.toString()}`);
+  };
+
+  const refreshStoryflowCourseData = async (teacherUsername: string) => {
+    await Promise.all([
+      hydrateTeacherStoryflowLibrary(teacherUsername),
+      hydrateTeacherStoryflowAssignments(teacherUsername),
+    ]);
+    setStoryflowDocuments(getTeacherStoryflowDocuments(teacherUsername));
+    setStoryflowFolders(getTeacherStoryflowFolders(teacherUsername));
+    setStoryflowAssignments(getTeacherStoryflowAssignments(teacherUsername));
+  };
+
+  const publishCourseLevelToClass = async (
+    folderId: string,
+    targetStudents = currentStudents
+  ) => {
+    if (!session) return;
+    const courseLevelDocuments = storyflowDocuments.filter(
+      (document) => document.folderId === folderId
+    );
+    const folder = storyflowFolders.find((item) => item.id === folderId);
+
+    if (!targetStudents.length) {
+      setMaterialNotice("");
+      setMaterialError("请至少选择 1 名学生。");
+      return;
+    }
+
+    if (!courseLevelDocuments.length) {
+      setMaterialNotice("");
+      setMaterialError("这个课程级别文件夹里还没有绘本资料。");
+      return;
+    }
+
+    try {
+      setCoursePublishingFolderId(folderId);
+      setMaterialError("");
+      setMaterialNotice(`正在把 ${folder?.name || "这个课程级别"} 分配给班级学生...`);
+      await Promise.all(
+        courseLevelDocuments.map((document) =>
+          publishStoryflowAssignments(
+            session.username,
+            session.displayName || session.username,
+            document,
+            targetStudents.map((student) => ({
+              username: student.username,
+              displayName: student.displayName,
+            })),
+            DEFAULT_STORYFLOW_ASSIGNMENT_MODULES
+          )
+        )
+      );
+      await refreshStoryflowCourseData(session.username);
+      setMaterialNotice(
+        `已把 ${folder?.name || "这个课程级别"} 的 ${courseLevelDocuments.length} 本绘本分配给 ${targetStudents.length} 名学生。`
+      );
+      setCoursePublishFolderId(null);
+      setSelectedCourseStudentIds([]);
+    } catch (error) {
+      setMaterialNotice("");
+      setMaterialError(error instanceof Error ? error.message : "课程分配失败，请重试。");
+    } finally {
+      setCoursePublishingFolderId(null);
+    }
   };
 
   if (!session || loading) {
@@ -320,7 +470,10 @@ function TeacherClassDetailContent() {
   }
 
   const theme = getClassCoverTheme(classInfo.name);
-  const materials = getClassMaterials();
+  const firstCourseLevelCard = courseLevelCards[0];
+  const selectedCoursePublishFolder = courseLevelCards.find(
+    (item) => item.folder.id === coursePublishFolderId
+  );
   const scheduleDays = getScheduleDays();
 
   const renderCourseView = () => {
@@ -613,19 +766,37 @@ function TeacherClassDetailContent() {
               </button>
               {materialMenuOpen ? (
                 <div className="absolute right-0 top-16 z-10 w-64 overflow-hidden rounded-[1.8rem] bg-white shadow-[0_24px_70px_rgba(15,23,42,0.14)]">
-                  {["新建文件夹", "添加", "移动", "排序", "删除"].map((item) => (
-                    <div
-                      key={item}
-                      className="border-b border-slate-100 px-8 py-6 text-center text-[2rem] font-medium text-slate-800 last:border-b-0"
-                    >
-                      {item}
-                    </div>
-                  ))}
+                  <button
+                    type="button"
+                    onClick={() => router.push("/teacher/storyflow/library")}
+                    className="w-full border-b border-slate-100 px-8 py-6 text-center text-[2rem] font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    管理课程级别
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/teacher/storyflow")}
+                    className="w-full border-b border-slate-100 px-8 py-6 text-center text-[2rem] font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    上传绘本
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMaterialMenuOpen(false);
+                      void refreshStoryflowCourseData(session.username);
+                    }}
+                    className="w-full px-8 py-6 text-center text-[2rem] font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    刷新课程
+                  </button>
                 </div>
               ) : null}
             </div>
             <div className="rounded-full bg-white px-4 py-2.5 shadow-md">
               <input
+                value={materialKeyword}
+                onChange={(event) => setMaterialKeyword(event.target.value)}
                 placeholder="搜索"
                 className="w-28 bg-transparent text-base font-black text-slate-800 outline-none placeholder:text-slate-400 md:w-36"
               />
@@ -633,27 +804,96 @@ function TeacherClassDetailContent() {
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {materials.map((item) => (
-            <article
-              key={`${materialPanel}-${item.id}`}
-              className="rounded-[2rem] bg-white/85 p-4 shadow-[0_24px_70px_rgba(148,163,184,0.12)]"
-            >
-              <div className={`rounded-[1.6rem] bg-gradient-to-br ${item.colorClass} p-4`}>
-                <div className="flex items-center justify-between text-white">
-                  <span className="rounded-lg bg-white/18 px-2 py-1 text-base font-black">
-                    {item.stageLabel}
-                  </span>
-                  <span className="text-lg font-black">{item.lessonCount}</span>
-                </div>
-                <div className="mt-6 grid h-28 place-items-center rounded-[1.3rem] bg-white/20 text-center text-sm font-semibold text-white/95">
-                  可测评
-                </div>
-              </div>
-              <p className="mt-4 text-center text-[2rem] font-black text-slate-900">{item.title}</p>
-            </article>
-          ))}
-        </div>
+        {materialNotice ? (
+          <div className="rounded-[1.5rem] border border-sky-200 bg-sky-50 px-5 py-4 text-base font-bold text-sky-700">
+            {materialNotice}
+          </div>
+        ) : null}
+        {materialError ? (
+          <div className="rounded-[1.5rem] border border-rose-200 bg-rose-50 px-5 py-4 text-base font-bold text-rose-600">
+            {materialError}
+          </div>
+        ) : null}
+
+        {materialPanel === "books" ? (
+          courseLevelCards.length ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {courseLevelCards.map((item) => {
+                const assignedTotal = item.documents.length * currentStudents.length;
+                const isAssigned = assignedTotal > 0 && item.assignedCount >= assignedTotal;
+                const publishing = coursePublishingFolderId === item.folder.id;
+
+                return (
+                  <article
+                    key={`${materialPanel}-${item.folder.id}`}
+                    className="rounded-[2rem] bg-white/85 p-4 shadow-[0_24px_70px_rgba(148,163,184,0.12)]"
+                  >
+                    <div className={`rounded-[1.6rem] bg-gradient-to-br ${item.colorClass} p-4`}>
+                      <div className="flex items-center justify-between text-white">
+                        <span className="rounded-lg bg-white/18 px-2 py-1 text-base font-black">
+                          课程级别
+                        </span>
+                        <span className="text-lg font-black">{item.documents.length} 本</span>
+                      </div>
+                      <div className="mt-6 grid h-28 place-items-center rounded-[1.3rem] bg-white/20 px-3 text-center text-sm font-semibold text-white/95">
+                        {item.documents.length
+                          ? item.documents
+                              .slice(0, 3)
+                              .map((document) => document.analysis.title || document.sourceName)
+                              .join(" / ")
+                          : "等待添加绘本"}
+                      </div>
+                    </div>
+                    <p className="mt-4 text-center text-[2rem] font-black text-slate-900">
+                      {item.folder.name}
+                    </p>
+                    <p className="mt-2 text-center text-sm font-semibold text-slate-500">
+                      已分配 {item.assignedCount}/{assignedTotal || 0}
+                    </p>
+                    <div className="mt-4 grid gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void publishCourseLevelToClass(item.folder.id)}
+                        disabled={publishing || !item.documents.length || !currentStudents.length}
+                        className="rounded-full bg-blue-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                      >
+                        {publishing ? "分配中..." : isAssigned ? "重新分配" : "分配给本班"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMaterialError("");
+                          setMaterialNotice("");
+                          setCoursePublishFolderId(item.folder.id);
+                          setSelectedCourseStudentIds([]);
+                        }}
+                        disabled={publishing || !item.documents.length || !currentStudents.length}
+                        className="rounded-full bg-sky-50 px-4 py-2.5 text-sm font-black text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-300"
+                      >
+                        选择学生分配
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/teacher/storyflow/library?folder=${item.folder.id}`)}
+                        className="rounded-full bg-slate-100 px-4 py-2.5 text-sm font-black text-slate-700 transition hover:bg-slate-200"
+                      >
+                        编辑课程资料
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-[2rem] bg-white/85 px-6 py-16 text-center text-slate-500 shadow-[0_24px_70px_rgba(148,163,184,0.12)]">
+              还没有课程级别文件夹。请到资料整理页创建 Stage 1、Stage 2 等课程级别，并把绘本放进去。
+            </div>
+          )
+        ) : (
+          <div className="rounded-[2rem] bg-white/85 px-6 py-16 text-center text-slate-500 shadow-[0_24px_70px_rgba(148,163,184,0.12)]">
+            {materialPanel === "courseware" ? "课件资料稍后可以接入同一套课程级别管理。" : "习题资料稍后可以接入同一套课程级别管理。"}
+          </div>
+        )}
       </div>
     );
   };
@@ -718,8 +958,16 @@ function TeacherClassDetailContent() {
               </div>
               <div className="space-y-3">
                 {taskEntries.map((entry, index) => {
-                  const material = materials[index % materials.length];
+                  const material = courseLevelCards[index % Math.max(courseLevelCards.length, 1)];
                   const isActive = selectedTask?.id === entry.id;
+                  const materialColorClass =
+                    material?.colorClass || firstCourseLevelCard?.colorClass || courseLevelColorClasses[0];
+                  const materialStageLabel = material?.folder.name || firstCourseLevelCard?.folder.name || "Storyflow";
+                  const materialLessonCount = material
+                    ? `${material.documents.length} 本`
+                    : firstCourseLevelCard
+                      ? `${firstCourseLevelCard.documents.length} 本`
+                      : "课程";
 
                   return (
                     <button
@@ -733,12 +981,12 @@ function TeacherClassDetailContent() {
                       }`}
                     >
                       <div className="flex items-start gap-4">
-                        <div className={`w-40 rounded-[1.2rem] bg-gradient-to-br ${material.colorClass} p-3`}>
+                        <div className={`w-40 rounded-[1.2rem] bg-gradient-to-br ${materialColorClass} p-3`}>
                           <div className="rounded-lg bg-white/18 px-2 py-1 text-xs font-black text-white">
-                            {material.stageLabel}
+                            {materialStageLabel}
                           </div>
                           <p className="mt-6 text-sm font-semibold text-white/95">
-                            {material.lessonCount}
+                            {materialLessonCount}
                           </p>
                         </div>
                         <div className="min-w-0">
@@ -1044,6 +1292,114 @@ function TeacherClassDetailContent() {
           {activeView === "activity" ? renderActivityView() : null}
         </section>
       </div>
+
+      {selectedCoursePublishFolder ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/35 px-4 py-8 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-[1.8rem] bg-white p-5 shadow-[0_24px_80px_rgba(15,23,42,0.24)]">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-500">
+                  课程分配
+                </p>
+                <h3 className="mt-2 text-2xl font-black text-slate-900">
+                  分配 {selectedCoursePublishFolder.folder.name}
+                </h3>
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  这个课程级别包含 {selectedCoursePublishFolder.documents.length} 本绘本。选择学生后，会把这些绘本任务发布到对应学生端。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setCoursePublishFolderId(null);
+                  setSelectedCourseStudentIds([]);
+                }}
+                className="rounded-full bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600 transition hover:bg-slate-200"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="mt-4 max-h-[52vh] space-y-2 overflow-y-auto rounded-[1.4rem] bg-slate-50 p-3">
+              {currentStudents.map((student) => {
+                const checked = selectedCourseStudentIds.includes(student.id);
+                return (
+                  <label
+                    key={student.id}
+                    className={`flex cursor-pointer items-center justify-between rounded-[1.1rem] border px-4 py-3 transition ${
+                      checked
+                        ? "border-sky-300 bg-sky-50"
+                        : "border-transparent bg-white hover:border-slate-200"
+                    }`}
+                  >
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">{student.displayName}</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {student.username}
+                        {student.className ? ` · ${student.className}` : ""}
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() =>
+                        setSelectedCourseStudentIds((current) =>
+                          checked
+                            ? current.filter((id) => id !== student.id)
+                            : [...current, student.id]
+                        )
+                      }
+                      className="h-5 w-5 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                    />
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-slate-500">
+                已选择 <span className="font-bold text-slate-900">{selectedCourseStudentIds.length}</span> 名学生
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedCourseStudentIds(currentStudents.map((student) => student.id))}
+                  className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedCourseStudentIds([])}
+                  className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
+                >
+                  清空
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void publishCourseLevelToClass(
+                      selectedCoursePublishFolder.folder.id,
+                      currentStudents.filter((student) =>
+                        selectedCourseStudentIds.includes(student.id)
+                      )
+                    )
+                  }
+                  disabled={
+                    coursePublishingFolderId === selectedCoursePublishFolder.folder.id ||
+                    !selectedCourseStudentIds.length
+                  }
+                  className="rounded-full bg-sky-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                >
+                  {coursePublishingFolderId === selectedCoursePublishFolder.folder.id
+                    ? "发布中..."
+                    : "发布给学生"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </TeacherShell>
   );
 }
