@@ -22,10 +22,7 @@ import {
   updateStoryflowAssignment,
 } from "@/lib/storyflowAssignments";
 import {
-  agentLessonFlowPrompt,
-  formatAgentLessonStatePrompt,
-  type AgentLessonStep,
-  type AgentLessonState,
+  intensiveLanguageTeachingFlowPrompt,
 } from "@/lib/agentLessonFlow";
 import type { AnalysisResult } from "@/types";
 
@@ -335,7 +332,26 @@ function isSimilarCoachRtcTranscriptToken(leftToken: string, rightToken: string)
   if (!left || !right) return false;
   if (left === right) return true;
   const lengthDiff = Math.abs(left.length - right.length);
-  return lengthDiff <= 2 && (left.startsWith(right) || right.startsWith(left));
+  if (lengthDiff <= 2 && (left.startsWith(right) || right.startsWith(left))) return true;
+  if (left.length < 3 || right.length < 3 || lengthDiff > 2) return false;
+
+  const editRows = Array.from({ length: left.length + 1 }, (_, index) => index);
+  for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+    let diagonal = editRows[0];
+    editRows[0] = rightIndex;
+    for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+      const above = editRows[leftIndex];
+      editRows[leftIndex] = Math.min(
+        editRows[leftIndex] + 1,
+        editRows[leftIndex - 1] + 1,
+        diagonal + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+      );
+      diagonal = above;
+    }
+  }
+
+  const maxDistance = Math.min(2, Math.max(1, Math.floor(Math.max(left.length, right.length) / 3)));
+  return editRows[left.length] <= maxDistance;
 }
 
 function isLikelyCoachRtcTranscriptRewrite(leftWords: string[], rightWords: string[]) {
@@ -380,18 +396,14 @@ function mergeCoachRtcTranscriptText(currentText: string, nextText: string) {
   }
 
   if (isLikelyCoachRtcTranscriptRewrite(currentWords, nextWords)) {
-    return next.length >= current.length ? next : current;
+    return next;
   }
 
   if (isLikelyTranscriptContinuation(current, next)) {
     return normalizeStoryText([current, next].filter(Boolean).join(" "));
   }
 
-  if (currentWords.length >= 3 && nextWords.length >= 2) {
-    return normalizeStoryText([current, next].filter(Boolean).join(" "));
-  }
-
-  return next.length >= current.length ? next : current;
+  return next;
 }
 
 function isIncompleteStudentTranscriptEnding(words: string[], currentText: string) {
@@ -1232,7 +1244,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const [coachError, setCoachError] = useState<string | null>(null);
   const [coachPanelPosition, setCoachPanelPosition] = useState<CoachPanelPosition>({ x: 20, y: 160 });
   const [pendingCoachAction, setPendingCoachAction] = useState<AiCoachPendingAction | null>(null);
-  const [intensiveLessonStep, setIntensiveLessonStep] = useState<AgentLessonStep>("intro");
   const [coachMessages, setCoachMessages] = useState<AiCoachMessage[]>([
     {
       id: "coach_welcome",
@@ -1249,7 +1260,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const lastCoachRtcTaskModeRef = useRef<TaskMode | null>(null);
   const hasIntroducedShadowRtcRulesRef = useRef(false);
   const hasIntroducedIntensiveRtcRulesRef = useRef(false);
-  const intensiveLessonStepRef = useRef<AgentLessonStep>("intro");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recordingStartMsRef = useRef<number>(0);
@@ -2151,36 +2161,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     }))
     .filter((message) => message.text);
 
-  const buildIntensiveLessonState = (
-    step: AgentLessonStep = intensiveLessonStepRef.current || intensiveLessonStep
-  ): AgentLessonState => ({
-    step,
-    round: step.startsWith("round2") || step === "summary" ? 2 : 1,
-    pageIndex: safeIndex,
-    pageCount: pages.length,
-    pageLabel: aiCoachPageLabel,
-  });
-
-  const updateIntensiveLessonStep = (step: AgentLessonStep) => {
-    intensiveLessonStepRef.current = step;
-    setIntensiveLessonStep(step);
-  };
-
-  const advanceIntensiveLessonStepFromSubtitle = (role: AiCoachMessage["role"], text: string) => {
-    if (resolvedTaskMode !== "intensive" || !text.trim()) return;
-    const current = intensiveLessonStepRef.current;
-    if (role === "student") {
-      if (current === "round1_picture") updateIntensiveLessonStep("round1_read");
-      else if (current === "round2_student_read") updateIntensiveLessonStep("round2_feedback");
-      else if (current === "round2_question") updateIntensiveLessonStep("round2_student_read");
-      return;
-    }
-    if (current === "intro") updateIntensiveLessonStep("round1_picture");
-    else if (current === "round1_read") updateIntensiveLessonStep("round1_explain");
-    else if (current === "round1_explain") updateIntensiveLessonStep("round1_next_page");
-    else if (current === "round2_feedback") updateIntensiveLessonStep("round2_question");
-  };
-
   const buildCoachRequestPayload = (
     message: string,
     screenshotDataUrl = ""
@@ -2455,13 +2435,12 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     if (resolvedTaskMode === "intensive") {
       if (
         hasIntroducedIntensiveRtcRulesRef.current ||
-        intensiveLessonStepRef.current !== "intro" ||
         safeIndex > 0 ||
         coachMessages.some(isVoiceSubtitleMessage)
       ) {
         return "我们继续刚才的学习。";
       }
-      return "我们开始绘本精讲。今天分两遍学习：第一遍我带你看图、读原文、讲重点；第二遍你来朗读，我帮你看发音和理解。现在先看当前页，你看到了什么？";
+      return "我们开始绘本精讲。今天重点学习原文里的重点单词、语法和重点句，我会结合画面讲清楚用法，不要求学生跟读。现在先听我讲当前页。";
     }
 
     if (resolvedTaskMode === "speaking") {
@@ -2501,16 +2480,11 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     const modeRules =
       resolvedTaskMode === "intensive"
         ? [
-            formatAgentLessonStatePrompt(buildIntensiveLessonState()),
-            agentLessonFlowPrompt,
-            "绘本精讲规则：上传资料已经由老师完成，你要基于当前屏幕画面和当前页可信原文逐页陪学。",
-            "课堂逻辑必须和 Agent 陪学一致：第一轮 AI 带读讲解，第二轮学生自主朗读并接受发音和理解反馈。",
-            "第一轮每页流程：先引导观察图片，再完整朗读当前页/当前侧页原文，随后解释重点句子和重点单词，最后用明确问题或明确指令让学生参与。",
-            "第二轮每页流程：先让学生朗读当前页，再按发音准确度、流畅度、语调和完整度反馈；每次只聚焦一两个关键问题，再问一个本页理解问题。",
-            "每次进入新页，先观察当前页，再按左到右、由图到文的顺序讲解。双页时必须先讲左页，再讲右页，中间要有一次学生互动。",
-            "原文为主：需要完整覆盖当前页可信原文，不能漏句、不能提前讲下一页、不能用绘本记忆补当前页没有的内容。",
-            "节奏要像老师一对一精讲：先读/讲一小段，再解释关键词或句型，再问孩子一个具体问题，等待孩子回应。",
-            "如果学生没有回复，也没有翻页，就停在当前小步，不要自动编后续剧情。",
+            intensiveLanguageTeachingFlowPrompt,
+            "绘本精讲规则：上传资料已经由老师完成。只使用当前屏幕画面和当前页可信原文逐页讲解，原文是唯一语言依据，画面只用于确定词义和故事语境。",
+            "需要完整覆盖当前页原文。双页按左页、右页顺序讲完重点单词、语法、重点句和应用后，整个跨页最多问一个与英文原文直接相关的问题。",
+            "重点句要讲得仔细，可以适当超过通用回复长度限制，但要分段清楚；不要只翻译，要解释句子结构、核心语法、可替换部分并给同结构例句。",
+            "禁止让学生练发音、跟读或朗读；禁止让学生描述画面、自由编故事或预测剧情。学生回答唯一的原文问题后，简短反馈并提示翻页。",
           ]
         : resolvedTaskMode === "speaking"
         ? [
@@ -2892,8 +2866,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
   const getLocalStudentSpeechRecognitionLang = () => {
     if (resolvedTaskMode === "intensive") {
-      const step = intensiveLessonStepRef.current || intensiveLessonStep;
-      return step.startsWith("round2") ? "en-US" : "zh-CN";
+      return "zh-CN";
     }
     if (resolvedTaskMode === "speaking") {
       return "zh-CN";
@@ -3112,7 +3085,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       if (!coachRtcStartedRef.current || coachManualStopRef.current) return;
       startLocalStudentSpeechSubtitles();
     }, 0);
-  }, [resolvedTaskMode, intensiveLessonStep]);
+  }, [resolvedTaskMode]);
 
   const normalizeCoachRtcSubtitleItems = (values: unknown[]): Array<Record<string, unknown>> => {
     const stack = values.map((value) => ({ value, inherited: {} as Record<string, unknown> }));
@@ -3596,12 +3569,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       return;
     }
 
-    let intensivePageTurnLessonState = "";
-    if (resolvedTaskMode === "intensive") {
-      updateIntensiveLessonStep("round1_picture");
-      intensivePageTurnLessonState = formatAgentLessonStatePrompt(buildIntensiveLessonState("round1_picture"));
-    }
-
     const pageChangeContextPrompt = [
       "【翻页后的最新页面上下文】",
       `当前唯一有效页：${aiCoachPageLabel}`,
@@ -3619,10 +3586,10 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       buildCoachRtcLessonStatePrompt(),
       resolvedTaskMode === "intensive"
         ? [
-            intensivePageTurnLessonState,
-            "请按照 Agent 陪学流程继续绘本精讲：第一轮先观察图片、完整朗读当前页/当前侧页原文、解释重点词句，再提出一次学生互动。不要等待学生再次提醒。",
-            "如果是双页，必须先讲左页，等学生回应后再讲右页；不要把左右页放在一个长回答里。",
-            "提出互动问题、要求学生朗读或提示翻页后，必须等待学生语音回复或真实翻页事件；如果没有学生语音回复，也没有翻页，就停止说话。",
+            intensiveLanguageTeachingFlowPrompt,
+            "请立即从当前页开始语言知识精讲：自然朗读原文一次，然后结合画面和故事语境讲重点单词、语法、重点句结构及应用例句。不要让学生描述画面。",
+            "如果是双页，按左页再右页讲解；两侧全部讲完后整个跨页最多问一个与英文原文直接相关的问题。不要要求学生跟读、朗读或练习发音。",
+            "学生回答后简短反馈并提示翻页；如果没有学生回复或真实翻页事件，就停止说话，不要编后续内容。",
           ].filter(Boolean).join("\n")
         : "请继续看图说话练习：只围绕当前唯一有效页，先引导学生观察和自己表达，不要直接给完整原文。清空上一页目标词和封面标题，不要继续讲封面或上一页。不要等待学生再次提醒。",
     ].join("\n");
@@ -3754,7 +3721,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           if (definite) applyCoachUiActionFromReply(text);
           setCoachInterimText("正在播放 Mia 的声音...");
         }
-        if (definite) advanceIntensiveLessonStepFromSubtitle(role, correctedText);
       });
     });
 
@@ -3788,7 +3754,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           markCoachRemoteAudioActive(item.definite ? 1800 : 3600);
           if (item.definite) applyCoachUiActionFromReply(correctedText);
         }
-        if (item.definite) advanceIntensiveLessonStepFromSubtitle(item.role, correctedText);
       });
       if (items.length) {
         setCoachInterimText(

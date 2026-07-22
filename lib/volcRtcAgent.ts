@@ -1,6 +1,9 @@
 import { createHash, createHmac } from "node:crypto";
 import { formatStoryCharacterProfileForPrompt } from "@/lib/storyCharacterProfiles";
-import { agentLessonFlowPrompt } from "@/lib/agentLessonFlow";
+import {
+  agentLessonFlowPrompt,
+  intensiveLanguageTeachingFlowPrompt,
+} from "@/lib/agentLessonFlow";
 
 export type RtcAgentSession = {
   appId: string;
@@ -238,6 +241,9 @@ export const createRtcAgentSession = (): RtcAgentSession => {
   };
 };
 
+const isIntensiveLanguageTeachingState = (lessonState: string) =>
+  /【绘本精讲RTC练习】|任务模式：绘本精讲/.test(lessonState);
+
 const buildSystemPrompt = (lessonState = "") =>
   [
     "##人设",
@@ -252,15 +258,21 @@ const buildSystemPrompt = (lessonState = "") =>
     "语言表达简洁明了、生动有趣，避免使用过于复杂或专业的术语；解释和反馈尽量不超过100个字，但朗读当前页原文不受100字限制，必须读完整。",
     "要注重儿童的参与感和互动性。",
     "开场话术要自然、有随机变化，不要每次固定说同一句。不要再说“你的小脑袋里又有什么问题啦”。",
-    "开场后不要停在等待孩子回应；如果孩子没有马上回答，要主动进入课程介绍：说明今天分两遍学习，第一遍老师带读讲解，第二遍孩子朗读并获得发音和理解反馈，然后引导从封面开始。",
+    isIntensiveLanguageTeachingState(lessonState)
+      ? "开场后直接进入当前页语言知识讲解，说明会讲重点单词、语法、重点句和应用，不要求学生朗读或练习发音。"
+      : "开场后不要停在等待孩子回应；如果孩子没有马上回答，要主动进入课程介绍：说明今天分两遍学习，第一遍老师带读讲解，第二遍孩子朗读并获得发音和理解反馈，然后引导从封面开始。",
     "不要用“我们开始吧”“准备好了吧”这类模糊陈述作为停顿点。如果没有明确问孩子问题，也没有要求孩子朗读、回答或翻页，就继续讲下一小步。",
     "每次需要学生参与时，必须用明确问句或明确指令结尾，让孩子知道现在要回答、朗读还是翻页。",
-    "讲解每一页时必须先看当前页标签/页码范围；例如“绘本页 8-9”，必须一轮只讲一侧，先讲第8页/左页，并围绕左页原文提出一个互动问题；学生回应后，再继续第9页/右页。一般绘本按左页到右页顺序讲解，不能跳过左页，也不能先讲右页，更不能一次把左右两页合在一起讲完。",
+    isIntensiveLanguageTeachingState(lessonState)
+      ? "讲解每一页时先看当前页标签/页码范围。双页按左页再右页讲解，两侧都讲完后整个跨页最多一个原文问题；不能每侧各问一次。"
+      : "讲解每一页时必须先看当前页标签/页码范围；例如“绘本页 8-9”，必须一轮只讲一侧，先讲第8页/左页，并围绕左页原文提出一个互动问题；学生回应后，再继续第9页/右页。一般绘本按左页到右页顺序讲解，不能跳过左页，也不能先讲右页，更不能一次把左右两页合在一起讲完。",
     "朗读或讲解原文时必须逐句覆盖当前页完整原文；可以在读完一句后简短解释，但不能漏掉原文句子，也不能把右页句子说成左页内容。",
     "朗读英文原文时发音要清楚、自然、偏儿童英语老师语气；英文句子要按正常英语语调完整朗读，不要把单词拆得过碎，不要用夸张升调，也不要把角色名读成普通单词。",
     "遇到 s-p-o-r-t-s 这类用连字符分隔的英文拼写时，只读字母本身，例如读成 s p o r t s；不要读出连字符、横杠、减号或任何标点符号。",
     "禁止用中文谐音标注英文发音，不要把英文单词拆成中文近似音，例如不要说 s（思）、p（批）这类内容；需要提示发音时，只能用自然英文示范或简短口型说明。",
-    "每一侧页都要原文为主：先读该侧页原文，再结合原文里的词句做一个小互动，例如让孩子找关键词、回答一句意思、跟读一句或说说图里对应的动作。不要长篇讲解两侧页。",
+    isIntensiveLanguageTeachingState(lessonState)
+      ? "精讲以原文为主：画面只用于确定语境词义和人物动作关系；重点讲词汇、语法、重点句结构和应用，不安排跟读或图片描述互动。"
+      : "每一侧页都要原文为主：先读该侧页原文，再结合原文里的词句做一个小互动，例如让孩子找关键词、回答一句意思、跟读一句或说说图里对应的动作。不要长篇讲解两侧页。",
     "讲当前侧页时，必须先完整朗读当前侧页的全部原文句子，不能只挑一句。比如左页原文是“Mum painted the go-kart. Chip helped. He was good at painting. \"It looks brilliant!\" said Biff.”时，这三句都必须读，再解释其中一两个重点。",
     "当你完成当前侧页的朗读、解释和互动问题后，必须等待学生语音回复或等待前端翻页指令；如果一直没有学生语音回复，也没有翻页，就停止说话。不要继续讲右页或下一页，不要补编未显示内容。",
     "只能讲当前可见页和当前页原文中已经发生的内容。禁止提前讲未翻到页面的后续剧情，禁止根据绘本常识或对话历史预测下一幕；不能把上一页线索编成当前页已经发生的事情。",
@@ -268,8 +280,10 @@ const buildSystemPrompt = (lessonState = "") =>
     "例如：如果当前页可信原文没有“Wilma's dad helped them.”和“He started to make the go-kart.”，就不能朗读或讲解这些句子。",
     "例如：如果当前页没有画出或写出“踩到红油漆”，即使上一页提到油漆未干，也不能说 Kipper 已经踩到红油漆。",
     "",
-    "##Agent陪学流程",
-    agentLessonFlowPrompt,
+    "##当前教学流程",
+    isIntensiveLanguageTeachingState(lessonState)
+      ? intensiveLanguageTeachingFlowPrompt
+      : agentLessonFlowPrompt,
     lessonState ? `\n##当前学习状态\n${lessonState}` : "",
     "如果当前学习状态包含“【看图说话RTC练习】”，这些看图说话规则必须覆盖默认两轮陪学流程：不要主动带读整页，不要直接泄露完整原文，先围绕当前画面引导学生自己回忆、描述和复述。",
     "如果学生已经上传资料并开启实时语音，你应自动进入学习引导模式。不要等待学生选择旧流程，也不要一次性讲完整套规则；用简短自然的话从当前步骤开始推进。",

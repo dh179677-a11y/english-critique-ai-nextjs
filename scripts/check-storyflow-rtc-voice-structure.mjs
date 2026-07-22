@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import vm from "node:vm";
+import ts from "typescript";
 
 const source = await readFile(
   new URL("../components/student/StoryflowTaskPlayer.tsx", import.meta.url),
@@ -24,6 +26,50 @@ const assignmentsSource = await readFile(
 const teacherWorkspaceSource = await readFile(
   new URL("../components/teacher/StoryflowWorkspace.tsx", import.meta.url),
   "utf8"
+);
+
+const transcriptMergeSource = source.match(
+  /const normalizeStoryText = [\s\S]*?(?=const isVoiceSubtitleMessage)/u
+)?.[0];
+assert.ok(transcriptMergeSource, "RTC transcript merge helpers must be available for behavior tests");
+const transcriptMergeContext = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    `${transcriptMergeSource}\nglobalThis.__transcriptMerge = { mergeCoachRtcTranscriptText };`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }
+  ).outputText,
+  transcriptMergeContext
+);
+const { mergeCoachRtcTranscriptText } = transcriptMergeContext.__transcriptMerge;
+
+assert.equal(
+  mergeCoachRtcTranscriptText("Keeper has spots.", "Kipper had spots."),
+  "Kipper had spots.",
+  "an iPad ASR whole-sentence correction must replace the draft instead of duplicating it"
+);
+assert.equal(
+  mergeCoachRtcTranscriptText(
+    "BEE and chip head spots, too.",
+    "Biff and Chip had spots too."
+  ),
+  "Biff and Chip had spots too.",
+  "a heavily corrected whole sentence must replace the earlier ASR draft"
+);
+assert.equal(
+  mergeCoachRtcTranscriptText("today in bed", "Staying bad, too."),
+  "Staying bad, too.",
+  "unrelated iPad ASR revisions must replace the draft instead of growing a transcript chain"
+);
+assert.equal(
+  [
+    "today in bed",
+    "Staying bad, too.",
+    "I'm bad too",
+    "She in bed too",
+    "Staying bad, too, she said.",
+  ].reduce((current, next) => mergeCoachRtcTranscriptText(current, next)),
+  "Staying bad, too, she said.",
+  "repeated iPad ASR revisions for one sentence must remain one bounded latest caption"
 );
 
 const beginCoachSession =
@@ -752,7 +798,7 @@ assert.match(
 );
 assert.match(
   source,
-  /function isLikelyCoachRtcTranscriptRewrite[\s\S]*matchedTokenCount[\s\S]*return coverage >= 0\.72[\s\S]*if \(isLikelyCoachRtcTranscriptRewrite\(currentWords, nextWords\)\) \{[\s\S]*return next\.length >= current\.length \? next : current/u,
+  /function isLikelyCoachRtcTranscriptRewrite[\s\S]*matchedTokenCount[\s\S]*return coverage >= 0\.72[\s\S]*if \(isLikelyCoachRtcTranscriptRewrite\(currentWords, nextWords\)\) \{[\s\S]*return next/u,
   "RTC subtitle merge must not duplicate one spoken sentence when ASR rewrites a word such as put -> puts"
 );
 assert.match(

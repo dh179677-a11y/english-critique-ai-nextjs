@@ -17,6 +17,14 @@ const teacherSource = await readFile(
   new URL("../components/teacher/StoryflowWorkspace.tsx", import.meta.url),
   "utf8"
 );
+const agentLessonFlowSource = await readFile(
+  new URL("../lib/agentLessonFlow.ts", import.meta.url),
+  "utf8"
+);
+const rtcAgentSource = await readFile(
+  new URL("../lib/volcRtcAgent.ts", import.meta.url),
+  "utf8"
+);
 
 const taskModeMeta =
   playerSource.match(/const TASK_MODE_META:[\s\S]*?= \[([\s\S]*?)\];/u)?.[1] || "";
@@ -26,6 +34,10 @@ const buildCoachRtcWelcomeMessage =
   playerSource.match(/const buildCoachRtcWelcomeMessage = \(\) => \{([\s\S]*?)\n  \};/u)?.[1] || "";
 const buildCoachRtcLessonStatePrompt =
   playerSource.match(/const buildCoachRtcLessonStatePrompt = \(\) => \{([\s\S]*?)\n  \};/u)?.[1] || "";
+const intensiveModeRules =
+  buildCoachRtcLessonStatePrompt.match(
+    /resolvedTaskMode === "intensive"[\s\S]*?\? \[([\s\S]*?)\n          \]\n        : resolvedTaskMode === "speaking"/u
+  )?.[1] || "";
 const aiCoachPanel =
   playerSource.slice(
     playerSource.indexOf("const aiCoachPanel ="),
@@ -33,6 +45,37 @@ const aiCoachPanel =
   );
 const overviewTaskCardMeta =
   playerSource.match(/const overviewTaskCardMeta:[\s\S]*?= \{([\s\S]*?)\n    \};/u)?.[1] || "";
+
+assert.match(
+  agentLessonFlowSource,
+  /export const intensiveLanguageTeachingFlowPrompt[\s\S]*重点单词[\s\S]*词性[\s\S]*常见搭配[\s\S]*重点句[\s\S]*句子结构[\s\S]*核心语法[\s\S]*同结构例句/u,
+  "intensive teaching must focus on vocabulary, grammar, sentence structure, and application"
+);
+assert.match(
+  agentLessonFlowSource,
+  /当前英文原文、当前画面和故事情境共同确定[\s\S]*spots[\s\S]*(皮肤上的红疹|疹子)/u,
+  "intensive vocabulary explanations must use the current story context"
+);
+assert.match(
+  agentLessonFlowSource,
+  /每个可见跨页最多提出一个问题[\s\S]*禁止要求学生跟读、朗读或练习发音[\s\S]*禁止让学生自由描述画面/u,
+  "intensive teaching must reduce questions and remove pronunciation practice"
+);
+assert.match(
+  rtcAgentSource,
+  /isIntensiveLanguageTeachingState[\s\S]*isIntensiveLanguageTeachingState\(lessonState\)[\s\S]*intensiveLanguageTeachingFlowPrompt[\s\S]*agentLessonFlowPrompt/u,
+  "RTC intensive sessions must replace the generic two-round lesson flow"
+);
+assert.match(
+  rtcAgentSource,
+  /isIntensiveLanguageTeachingState\(lessonState\)[\s\S]*开场后直接进入当前页语言知识讲解[\s\S]*说明今天分两遍学习/u,
+  "RTC intensive sessions must override the generic two-round opening constraint"
+);
+assert.match(
+  rtcAgentSource,
+  /isIntensiveLanguageTeachingState\(lessonState\)[\s\S]*整个跨页最多一个原文问题[\s\S]*每一侧页都要原文为主/u,
+  "RTC intensive sessions must override per-side interactions and follow-reading"
+);
 
 assert.ok(taskModeMeta, "TASK_MODE_META was not found");
 assert.match(
@@ -96,34 +139,29 @@ assert.match(
   "RTC lesson state must send intensive reading rules without student-facing Agent wording"
 );
 assert.match(
-  playerSource,
-  /agentLessonFlowPrompt[\s\S]*formatAgentLessonStatePrompt[\s\S]*type AgentLessonStep/u,
-  "student 绘本精讲 must import Agent lesson flow primitives"
-);
-assert.match(
-  playerSource,
-  /const \[intensiveLessonStep,\s*setIntensiveLessonStep\] = useState<AgentLessonStep>\("intro"\)/u,
-  "student 绘本精讲 must keep the same lesson step state as Agent mode"
-);
-assert.match(
-  playerSource,
-  /const buildIntensiveLessonState = [\s\S]*round1_picture[\s\S]*round2_student_read/u,
-  "student 绘本精讲 must build progress-aware Agent lesson state"
-);
-assert.match(
-  playerSource,
-  /advanceIntensiveLessonStepFromSubtitle[\s\S]*round1_picture[\s\S]*round1_read[\s\S]*round2_student_read[\s\S]*round2_feedback/u,
-  "student 绘本精讲 must advance lesson steps from student and Mia subtitles"
-);
-assert.match(
   buildCoachRtcLessonStatePrompt,
-  /formatAgentLessonStatePrompt\(buildIntensiveLessonState\(\)\)[\s\S]*agentLessonFlowPrompt/u,
-  "绘本精讲 RTC lesson state must embed Agent two-round lesson flow and current step"
+  /resolvedTaskMode === "intensive"[\s\S]*intensiveLanguageTeachingFlowPrompt[\s\S]*当前页分栏原文/u,
+  "Storyflow intensive context must use the language teaching flow"
+);
+assert.doesNotMatch(
+  intensiveModeRules,
+  /第二轮|自主朗读|按发音准确度|朗读流畅度|语调和完整度|要求学生跟读/u,
+  "Storyflow intensive mode must not retain pronunciation or rereading steps"
+);
+assert.match(
+  buildCoachRtcWelcomeMessage,
+  /重点单词、语法和重点句[\s\S]*不要求学生跟读/u,
+  "the intensive welcome must introduce the language teaching lesson"
+);
+assert.doesNotMatch(
+  playerSource,
+  /intensiveLessonStep|buildIntensiveLessonState|advanceIntensiveLessonStepFromSubtitle/u,
+  "student 绘本精讲 must remove the old two-round pronunciation state machine"
 );
 assert.match(
   playerSource,
-  /notifyCoachRtcPageChanged[\s\S]*resolvedTaskMode === "intensive"[\s\S]*updateIntensiveLessonStep\("round1_picture"\)[\s\S]*formatAgentLessonStatePrompt\(buildIntensiveLessonState\("round1_picture"\)\)/u,
-  "绘本精讲 page turns must reset to Agent round1_picture and notify the active RTC agent"
+  /notifyCoachRtcPageChanged[\s\S]*resolvedTaskMode === "intensive"[\s\S]*intensiveLanguageTeachingFlowPrompt[\s\S]*整个跨页最多问一个[\s\S]*不要要求学生跟读、朗读或练习发音/u,
+  "绘本精讲 page turns must continue the language teaching flow without reading practice"
 );
 assert.match(
   playerSource,
