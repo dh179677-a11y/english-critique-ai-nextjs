@@ -48,8 +48,8 @@ const overviewTaskCardMeta =
 
 assert.match(
   agentLessonFlowSource,
-  /export const intensiveLanguageTeachingFlowPrompt[\s\S]*重点单词[\s\S]*词性[\s\S]*常见搭配[\s\S]*重点句[\s\S]*句子结构[\s\S]*核心语法[\s\S]*同结构例句/u,
-  "intensive teaching must focus on vocabulary, grammar, sentence structure, and application"
+  /export const intensiveLanguageTeachingFlowPrompt[\s\S]*重点单词[\s\S]*词性[\s\S]*常见搭配[\s\S]*重点句[\s\S]*儿童习得方式[\s\S]*短例句或替换应用/u,
+  "intensive teaching must focus on vocabulary and child-friendly language application"
 );
 assert.match(
   agentLessonFlowSource,
@@ -150,8 +150,18 @@ assert.doesNotMatch(
 );
 assert.match(
   buildCoachRtcWelcomeMessage,
-  /重点单词、语法和重点句[\s\S]*不要求学生跟读/u,
-  "the intensive welcome must introduce the language teaching lesson"
+  /我们开始绘本精讲。今天重点学习原文里的单词、语法和句型应用。我会结合画面讲清楚用法。现在先听我讲当前页。/u,
+  "the intensive welcome must use the approved concise copy"
+);
+assert.doesNotMatch(
+  buildCoachRtcWelcomeMessage,
+  /不要求学生跟读|重点单词、语法和重点句/u,
+  "the intensive welcome must not repeat 重点 or expose internal follow-reading rules"
+);
+assert.match(
+  agentLessonFlowSource,
+  /每个可见跨页最多讲一个最有用的语言规律[\s\S]*一到两个短例句或替换应用[\s\S]*禁止讲主谓宾、宾语补足语、时态定义、动词变位表/u,
+  "intensive grammar teaching must use child-friendly acquisition"
 );
 assert.doesNotMatch(
   playerSource,
