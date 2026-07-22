@@ -4996,6 +4996,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
   if (resolvedTaskMode === "speaking" || resolvedTaskMode === "intensive") {
     const isIntensiveMode = resolvedTaskMode === "intensive";
+    const intensivePageTextParts = splitDualPageText(page?.visibleText || "");
     const speakingCoachPrompts = isIntensiveMode
       ? [
           "请精讲这一页",
@@ -5154,12 +5155,29 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
               </div>
 
               {isIntensiveMode ? (
-                <div className="mt-2 rounded-[1.05rem] border border-sky-100 bg-white px-4 py-3 text-center shadow-[0_12px_28px_rgba(120,149,188,0.1)]">
-                  <p className="text-xs font-black uppercase tracking-[0.2em] text-sky-500">Page Text</p>
-                  <p className="mt-2 text-base font-semibold leading-7 text-slate-800">
-                    {page?.visibleText || "当前页暂无后台原文，Mia 会优先根据屏幕画面讲解。"}
-                  </p>
-                </div>
+                intensivePageTextParts.rightText ? (
+                  <div className="mt-2 grid gap-2 md:grid-cols-2">
+                    <div className="rounded-[1.05rem] border border-sky-300 bg-white px-4 py-3 text-left shadow-[0_12px_28px_rgba(120,149,188,0.1)]">
+                      <p className="text-xs font-black uppercase tracking-[0.2em] text-sky-500">Left Page</p>
+                      <p className="mt-2 text-base font-semibold leading-7 text-slate-800">
+                        {intensivePageTextParts.leftText}
+                      </p>
+                    </div>
+                    <div className="rounded-[1.05rem] border border-indigo-200 bg-white px-4 py-3 text-left shadow-[0_12px_28px_rgba(120,149,188,0.1)]">
+                      <p className="text-xs font-black uppercase tracking-[0.2em] text-indigo-500">Right Page</p>
+                      <p className="mt-2 text-base font-semibold leading-7 text-slate-800">
+                        {intensivePageTextParts.rightText}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 rounded-[1.05rem] border border-sky-100 bg-white px-4 py-3 text-center shadow-[0_12px_28px_rgba(120,149,188,0.1)]">
+                    <p className="text-xs font-black uppercase tracking-[0.2em] text-sky-500">Page Text</p>
+                    <p className="mt-2 text-base font-semibold leading-7 text-slate-800">
+                      {intensivePageTextParts.leftText || "当前页暂无后台原文，Mia 会优先根据屏幕画面讲解。"}
+                    </p>
+                  </div>
+                )
               ) : (
                 <div className="mt-2 grid shrink-0 gap-2 md:grid-cols-3">
                   <button

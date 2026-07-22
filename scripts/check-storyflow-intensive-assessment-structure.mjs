@@ -143,6 +143,16 @@ assert.match(
   /resolvedTaskMode === "intensive"[\s\S]*intensiveLanguageTeachingFlowPrompt[\s\S]*当前页分栏原文/u,
   "Storyflow intensive context must use the language teaching flow"
 );
+assert.match(
+  playerSource,
+  /const intensivePageTextParts = splitDualPageText\(page\?\.visibleText \|\| ""\)/u,
+  "intensive page text must split the persisted left and right page source"
+);
+assert.match(
+  playerSource,
+  /isIntensiveMode[\s\S]*intensivePageTextParts\.rightText[\s\S]*Left Page[\s\S]*Right Page[\s\S]*Page Text/u,
+  "intensive page text must render dual-page cards and retain the single-page fallback"
+);
 assert.doesNotMatch(
   intensiveModeRules,
   /第二轮|自主朗读|按发音准确度|朗读流畅度|语调和完整度|要求学生跟读/u,
