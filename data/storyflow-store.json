@@ -3086,13 +3086,6 @@
             "endSec": 9.27
           },
           {
-            "pageIndex": 2,
-            "slot": "right",
-            "trackIndex": 0,
-            "startSec": 12.68,
-            "endSec": 18.8
-          },
-          {
             "pageIndex": 3,
             "slot": "left",
             "trackIndex": 0,
@@ -3160,7 +3153,7 @@
       "analysis": {
         "title": "Spots!",
         "summary": "孩子们和妈妈都长了红疹生病了，爸爸不得不辛苦地照顾全家并承担所有家务。当全家人终于康复时，大家却惊讶地发现这次轮到爸爸长红疹倒下了。",
-        "fullText": "Spots\nKipper had spots.\n[RIGHT_PAGE] Biff and Chip had spots too.\nThe doctor came. [RIGHT_PAGE] \"Stay in bed too\", she said.\nMum had spots. [RIGHT_PAGE] \"Stay in bed too\", said the doctor.\nDad looked after everyone.\nHe put the washing out.\nHe went shopping. [RIGHT_PAGE] \"What a job!\" said Dad.\nEveryone got better. [RIGHT_PAGE] \"Oh, no!\" said Mum.\nDad had spots.",
+        "fullText": "Spots\nKipper had spots.\nBiff and Chip had spots too.\nThe doctor came. [RIGHT_PAGE] \"Stay in bed too\", she said.\nMum had spots. [RIGHT_PAGE] \"Stay in bed too\", said the doctor.\nDad looked after everyone.\nHe put the washing out.\nHe went shopping. [RIGHT_PAGE] \"What a job!\" said Dad.\nEveryone got better. [RIGHT_PAGE] \"Oh, no!\" said Mum.\nDad had spots.",
         "characters": [
           "Kipper",
           "Biff",
@@ -3222,8 +3215,8 @@
           {
             "pageIndex": 2,
             "pageTitle": "Page 3",
-            "storyBeat": "[RIGHT_PAGE] Biff and Chip had spots too.",
-            "visibleText": "[RIGHT_PAGE] Biff and Chip had spots too.",
+            "storyBeat": "Biff and Chip had spots too.",
+            "visibleText": "Biff and Chip had spots too.",
             "clozeHint": "",
             "bilingualHint": "可先引导孩子先说出主角，再追问这个角色有什么明显特点。",
             "speakingPrompt": [
@@ -3232,12 +3225,12 @@
               "Which key word can help you remember the sentence? Try the key word."
             ],
             "keyVocabulary": [
-              "right",
-              "page",
               "biff",
               "and",
               "chip",
-              "had"
+              "had",
+              "spots",
+              "too"
             ]
           },
           {
@@ -3385,7 +3378,7 @@
         "shadowPageTexts": [
           "Spots",
           "Kipper had spots.",
-          "[RIGHT_PAGE] Biff and Chip had spots too.",
+          "Biff and Chip had spots too.",
           "The doctor came. [RIGHT_PAGE] \"Stay in bed too\", she said.",
           "Mum had spots. [RIGHT_PAGE] \"Stay in bed too\", said the doctor.",
           "Dad looked after everyone.",
@@ -3404,7 +3397,7 @@
         ],
         "teacherGuide": []
       },
-      "updatedAt": 1784711821389,
+      "updatedAt": 1784739760846,
       "sortOrder": 3,
       "folderId": "story_folder_1784704479017_03ntt4",
       "category": "",
@@ -3666,7 +3659,6 @@
         }
       },
       "pairEditorModePages": [
-        2,
         3,
         4,
         7,
@@ -4406,7 +4398,7 @@
       "documentId": "story_1776616711309_l312xd",
       "documentTitle": "Spots!",
       "createdAt": 1776899199901,
-      "updatedAt": 1784653460914,
+      "updatedAt": 1784740658690,
       "enabledModules": [
         "animation",
         "shadow",
@@ -4415,10 +4407,10 @@
       ],
       "shadowSubmission": null,
       "speakingSubmission": {
-        "completedAt": 1784653460914,
+        "completedAt": 1784740658690,
         "latestPracticeRecord": {
-          "id": "practice_1784653458518_jawx7e",
-          "createdAt": 1784653458518,
+          "id": "practice_1784740654262_f9rdy0",
+          "createdAt": 1784740654262,
           "durationSec": 2,
           "promptRevealCount": 0,
           "originalRevealCount": 0,
