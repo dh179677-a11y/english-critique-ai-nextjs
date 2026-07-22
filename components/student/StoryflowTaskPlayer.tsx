@@ -1260,6 +1260,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const lastCoachRtcTaskModeRef = useRef<TaskMode | null>(null);
   const hasIntroducedShadowRtcRulesRef = useRef(false);
   const hasIntroducedIntensiveRtcRulesRef = useRef(false);
+  const shouldResumeIntensiveAfterReconnectRef = useRef(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recordingStartMsRef = useRef<number>(0);
@@ -2356,6 +2357,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     setIsCoachListening(false);
     clearCoachRemoteAudioActive();
     coachExpectedSpeechRef.current = "";
+    shouldResumeIntensiveAfterReconnectRef.current = false;
     setIsCoachThinking(false);
     setCoachInterimText("");
     void stopCoachRtcAgentSession();
@@ -3408,6 +3410,33 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     throw new Error(payload.error || "RTC 智能体文本触发失败");
   };
 
+  const continueIntensiveAfterReconnectWelcome = (
+    role: AiCoachMessage["role"],
+    text: string,
+    definite: boolean
+  ) => {
+    if (
+      role !== "coach" ||
+      !definite ||
+      !shouldResumeIntensiveAfterReconnectRef.current ||
+      !text.includes("我们继续刚才的学习")
+    ) {
+      return;
+    }
+
+    shouldResumeIntensiveAfterReconnectRef.current = false;
+    window.setTimeout(() => {
+      if (!coachRtcStartedRef.current || coachManualStopRef.current) return;
+      void sendCoachRtcAgentControlMessage(
+        [
+          "【重连后立即继续当前页精讲】",
+          buildCoachRtcLessonStatePrompt(),
+          "欢迎语已经播放完毕。不要再次寒暄、不要等待学生提醒，请立即按照当前页原文继续讲重点单词、儿童化语言规律和句型应用。",
+        ].join("\n")
+      );
+    }, 240);
+  };
+
   const sendCoachRtcAgentContextPrompt = async (message: string) => {
     const session = coachRtcAgentSessionRef.current;
     if (!session || !coachRtcStartedRef.current) return false;
@@ -3713,6 +3742,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           text: correctedText,
           definite,
         });
+        continueIntensiveAfterReconnectWelcome(role, correctedText, definite);
         if (role === "student") {
           consumePendingCoachActionIfConfirmed(correctedText);
           setCoachInterimText("Mia 正在听...");
@@ -3748,6 +3778,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           text: correctedText,
           definite: item.definite,
         });
+        continueIntensiveAfterReconnectWelcome(item.role, correctedText, item.definite);
         if (item.role === "student") {
           consumePendingCoachActionIfConfirmed(correctedText);
         } else {
@@ -3855,6 +3886,12 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     if (resolvedTaskMode === "shadow") {
       stopShadowAudioPlayback();
     }
+    const isResumedIntensiveLesson =
+      resolvedTaskMode === "intensive" &&
+      (hasIntroducedIntensiveRtcRulesRef.current ||
+        safeIndex > 0 ||
+        coachMessagesRef.current.some(isVoiceSubtitleMessage));
+    shouldResumeIntensiveAfterReconnectRef.current = isResumedIntensiveLesson;
     const welcomeMessage = buildCoachRtcWelcomeMessage();
     coachExpectedSpeechRef.current = welcomeMessage;
     const shouldMarkShadowRulesIntroduced =

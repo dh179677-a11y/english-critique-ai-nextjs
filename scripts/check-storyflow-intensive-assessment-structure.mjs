@@ -163,6 +163,16 @@ assert.match(
   /我们开始绘本精讲。今天重点学习原文里的单词、语法和句型应用。我会结合画面讲清楚用法。现在先听我讲当前页。/u,
   "the intensive welcome must use the approved concise copy"
 );
+assert.match(
+  playerSource,
+  /shouldResumeIntensiveAfterReconnectRef[\s\S]*continueIntensiveAfterReconnectWelcome[\s\S]*我们继续刚才的学习[\s\S]*sendCoachRtcAgentControlMessage[\s\S]*重连后立即继续当前页精讲/u,
+  "intensive RTC reconnect must automatically continue teaching after the reconnect welcome"
+);
+assert.match(
+  playerSource,
+  /resolvedTaskMode === "intensive"[\s\S]*hasIntroducedIntensiveRtcRulesRef\.current[\s\S]*shouldResumeIntensiveAfterReconnectRef\.current/u,
+  "intensive RTC start must arm auto-resume only for a resumed lesson"
+);
 assert.doesNotMatch(
   buildCoachRtcWelcomeMessage,
   /不要求学生跟读|重点单词、语法和重点句/u,
