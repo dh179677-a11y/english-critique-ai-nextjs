@@ -152,10 +152,82 @@ sudo apt-get install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d your-domain.com
 ```
 
-### 7. 更新代码
+### 7. 首次迁移生产数据
+
+账号、课程、作业和 COS 视频关联必须放在代码目录之外。生产环境固定使用：
+
+```text
+/root/english-critique-data
+```
+
+**首次升级必须先迁移数据，再拉取新代码。** 如果先执行 `git pull`，Git 可能移除或覆盖代码目录内原先被跟踪的数据文件。
+
+当前腾讯云服务器的项目目录是 `/root/english-critique-ai-nextjs`。首次升级执行：
 
 ```bash
-cd /var/www/english-critique-ai
+cd /root/english-critique-ai-nextjs
+pm2 stop english-critique-ai
+
+MIGRATION_BACKUP="/root/data-migration-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$MIGRATION_BACKUP" /root/english-critique-data
+cp -a data/portal-store.json data/storyflow-store.json "$MIGRATION_BACKUP/"
+cp -a data/portal-store.json data/storyflow-store.json /root/english-critique-data/
+
+node -e '
+const fs = require("fs");
+for (const file of [
+  "/root/english-critique-data/portal-store.json",
+  "/root/english-critique-data/storyflow-store.json",
+]) JSON.parse(fs.readFileSync(file, "utf8"));
+console.log("生产数据迁移校验通过");
+'
+
+grep -q "^APP_DATA_DIR=" .env.production \
+  && sed -i "s|^APP_DATA_DIR=.*|APP_DATA_DIR=/root/english-critique-data|" .env.production \
+  || printf "\nAPP_DATA_DIR=/root/english-critique-data\n" >> .env.production
+
+git pull
+npm install
+npm run build
+pm2 restart english-critique-ai --update-env
+```
+
+启动后检查外部数据：
+
+```bash
+node - <<'NODE'
+const fs = require("fs");
+
+const portal = JSON.parse(
+  fs.readFileSync("/root/english-critique-data/portal-store.json", "utf8")
+);
+const storyflow = JSON.parse(
+  fs.readFileSync("/root/english-critique-data/storyflow-store.json", "utf8")
+);
+const videoCount = (storyflow.documents || []).reduce(
+  (total, document) => total + (document.aiAnimations?.length || 0),
+  0
+);
+
+console.log({
+  users: portal.users?.length || 0,
+  classes: portal.classes?.length || 0,
+  records: portal.records?.length || 0,
+  documents: storyflow.documents?.length || 0,
+  assignments: storyflow.assignments?.length || 0,
+  videoAssociations: videoCount,
+});
+NODE
+```
+
+确认数量正确后，再登录老师端检查现有学员和动画视频。迁移失败时不要删除 `/root/english-critique-data` 或 `$MIGRATION_BACKUP`，先恢复旧版本并使用备份文件。
+
+### 8. 后续更新代码
+
+完成首次迁移后，后续部署只更新代码：
+
+```bash
+cd /root/english-critique-ai-nextjs
 git pull
 npm install
 npm run build
@@ -166,7 +238,9 @@ pm2 restart english-critique-ai --update-env
 
 - 当前版本会先从浏览器直传视频到腾讯云 COS，再把 `objectKey` 发给 `/api/analyze`。
 - 登录态使用服务端签名的 `httpOnly cookie`，生产环境必须配置 `SESSION_SECRET`。
-- 账号、班级、测评记录当前保存在服务器本地 `data/portal-store.json`，适合单机部署；如果后面改成多机或 Serverless，需要迁移到数据库。
+- 生产环境的账号、班级、测评、课程、作业和视频关联保存在 `APP_DATA_DIR` 指定的目录；腾讯云当前固定为 `/root/english-critique-data`。
+- 本地未设置 `APP_DATA_DIR` 时仍使用项目内 `data/`。运行时 JSON 已从 Git 跟踪中移除，不要再次提交。
+- 当前文件存储适合单机部署；如果后面改成多机或 Serverless，需要迁移到数据库。
 - 分析接口会在服务端生成临时下载链接，再交给上游 LLM 读取。
 - Nginx 仍建议保留较大的 `client_max_body_size`，但大文件不再穿过 Next.js 服务端。
 - COS 存储桶建议保持私有读写，项目会按需生成临时签名链接。

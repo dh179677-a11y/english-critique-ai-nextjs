@@ -30,3 +30,7 @@ tsconfig.tsbuildinfo
 
 # Isolated feature worktrees
 .worktrees/
+
+# Runtime application data must live outside production deploy directories.
+data/portal-store.json
+data/storyflow-store.json
