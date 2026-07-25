@@ -13,6 +13,7 @@ import {
   type StoryflowFolder,
   type StoryflowTeacherSettings,
 } from "@/lib/storyflowStore";
+import { getAppDataDirectory } from "@/lib/serverDataPath";
 
 interface StoryflowStoreData {
   documents: StoryflowDocument[];
@@ -21,7 +22,7 @@ interface StoryflowStoreData {
   assignments: StoryflowAssignment[];
 }
 
-const STORE_DIR = path.join(process.cwd(), "data");
+const STORE_DIR = getAppDataDirectory();
 const STORE_FILE = path.join(STORE_DIR, "storyflow-store.json");
 
 const EMPTY_STORE: StoryflowStoreData = {

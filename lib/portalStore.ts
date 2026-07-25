@@ -4,6 +4,7 @@ import path from "path";
 import type { AppUser, TeacherClass } from "@/lib/clientAuth";
 import type { UserAnalysisRecord } from "@/lib/clientRecords";
 import { hashPassword } from "@/lib/passwordSecurity";
+import { getAppDataDirectory } from "@/lib/serverDataPath";
 import {
   DEFAULT_PORTAL_FEATURE_SETTINGS,
   type PortalFeatureSettings,
@@ -16,7 +17,7 @@ interface PortalStoreData {
   featureSettings: PortalFeatureSettings;
 }
 
-const STORE_DIR = path.join(process.cwd(), "data");
+const STORE_DIR = getAppDataDirectory();
 const STORE_FILE = path.join(STORE_DIR, "portal-store.json");
 
 const EMPTY_STORE: PortalStoreData = {
