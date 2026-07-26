@@ -24,6 +24,10 @@ import {
 import {
   intensiveLanguageTeachingFlowPrompt,
 } from "@/lib/agentLessonFlow";
+import {
+  buildPreviouslyTaughtVocabulary,
+  formatPreviouslyTaughtVocabularyPrompt,
+} from "@/lib/intensiveVocabularyMemory";
 import type { AnalysisResult } from "@/types";
 
 type StoryflowTaskPlayerProps = {
@@ -2460,6 +2464,13 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     return "我们继续刚才的学习。";
   };
 
+  const intensiveVocabularyMemory = buildPreviouslyTaughtVocabulary(
+    pages,
+    safeIndex
+  );
+  const intensiveVocabularyMemoryPrompt =
+    formatPreviouslyTaughtVocabularyPrompt(intensiveVocabularyMemory);
+
   const buildCoachRtcLessonStatePrompt = () => {
     const visibleState =
       resolvedTaskMode === "intensive"
@@ -2483,6 +2494,8 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       resolvedTaskMode === "intensive"
         ? [
             intensiveLanguageTeachingFlowPrompt,
+            intensiveVocabularyMemoryPrompt,
+            "清单中的词族已经在本次绘本前页完成精讲。当前页再次出现时只能简短回顾，不得重新完整讲解；优先讲当前页第一次出现的新重点词。",
             "绘本精讲规则：上传资料已经由老师完成。只使用当前屏幕画面和当前页可信原文逐页讲解，原文是唯一语言依据，画面只用于确定词义和故事语境。",
             "需要完整覆盖当前页原文。双页按左页、右页顺序讲完重点单词、语法、重点句和应用后，整个跨页最多问一个与英文原文直接相关的问题。",
             "重点句用儿童习得方式讲：先结合故事说清句意，每个跨页最多点出一个有用的表达规律，再用一到两个短例句或替换词展示应用；没有必要的语法点时不要强行讲。",

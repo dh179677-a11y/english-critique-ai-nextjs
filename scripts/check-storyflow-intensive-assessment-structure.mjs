@@ -53,6 +53,31 @@ assert.match(
 );
 assert.match(
   agentLessonFlowSource,
+  /同一词族在前页已经精讲[\s\S]*最多一句简短回顾[\s\S]*禁止重复词性、完整词义列表、常见搭配、发音拆解和生活例句/u,
+  "intensive prompt must forbid repeated full vocabulary explanations"
+);
+assert.match(
+  playerSource,
+  /buildPreviouslyTaughtVocabulary[\s\S]*formatPreviouslyTaughtVocabularyPrompt/u,
+  "student intensive RTC must build vocabulary memory from prior pages"
+);
+assert.match(
+  buildCoachRtcLessonStatePrompt,
+  /intensiveVocabularyMemoryPrompt/u,
+  "shared intensive RTC lesson state must include vocabulary memory"
+);
+assert.match(
+  playerSource,
+  /continueIntensiveAfterReconnectWelcome[\s\S]*buildCoachRtcLessonStatePrompt/u,
+  "reconnect continuation must reuse lesson state containing vocabulary memory"
+);
+assert.match(
+  playerSource,
+  /notifyCoachRtcPageChanged[\s\S]*buildCoachRtcLessonStatePrompt/u,
+  "page changes must reuse lesson state containing vocabulary memory"
+);
+assert.match(
+  agentLessonFlowSource,
   /当前英文原文、当前画面和故事情境共同确定[\s\S]*spots[\s\S]*(皮肤上的红疹|疹子)/u,
   "intensive vocabulary explanations must use the current story context"
 );
