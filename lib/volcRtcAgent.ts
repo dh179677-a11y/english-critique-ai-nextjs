@@ -335,7 +335,7 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
         ThinkingType: "disabled",
         Prefill: false,
         VisionConfig: {
-          Enable: true,
+          Enable: false,
         },
         HistoryLength: isShadowRtcLessonState(session.lessonState || "") ? 1 : 10,
         Temperature: 0.1,

@@ -3854,13 +3854,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     });
 
     setCoachInterimText("正在加入 RTC 房间...");
-    let hasVisualTrack = false;
-    try {
-      setCoachInterimText("正在准备当前页面视觉流...");
-      hasVisualTrack = await startCoachRtcVisualTrack(engine, StreamIndex, VideoSourceType);
-    } catch {
-      hasVisualTrack = false;
-    }
     if (isStaleCoachRtcStart()) {
       await stopCoachRtcAgentSession();
       return;
@@ -3882,7 +3875,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
     setCoachInterimText("正在打开麦克风...");
     await engine.startAudioCapture();
-    await engine.publishStream(hasVisualTrack ? MediaType.AUDIO_AND_VIDEO : MediaType.AUDIO);
+    await engine.publishStream(MediaType.AUDIO);
     await engine.startSubtitle?.({ mode: 0 }).catch((error: unknown) => {
       setCoachInterimText(
         error instanceof Error
@@ -3944,11 +3937,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     setIsCoachOpen(true);
     startLocalStudentSpeechSubtitles();
     setCoachPanelPosition(getRightMiddleCoachPanelPosition(true));
-    setCoachInterimText(
-      hasVisualTrack
-        ? "RTC 智能体语音已开启，Mia 正在接收当前页面画面。"
-        : "RTC 智能体语音已开启，但当前页面视觉流未发布。"
-    );
+    setCoachInterimText("RTC 智能体纯语音模式已开启。");
   };
 
   const askAiCoach = async (rawMessage: string) => {

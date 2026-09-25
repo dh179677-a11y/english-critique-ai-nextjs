@@ -3937,13 +3937,6 @@ export default function AgentStudyClient() {
     });
 
     setVoiceStatus("正在加入 RTC 房间...");
-    let hasVisualTrack = false;
-    try {
-      setVoiceStatus("正在准备当前页面视觉流...");
-      hasVisualTrack = await startRtcVisualTrack(engine, StreamIndex, VideoSourceType);
-    } catch {
-      hasVisualTrack = false;
-    }
 
     await engine.joinRoom(
       sessionPayload.token,
@@ -3961,7 +3954,7 @@ export default function AgentStudyClient() {
 
     setVoiceStatus("正在打开麦克风...");
     await engine.startAudioCapture();
-    await engine.publishStream(hasVisualTrack ? MediaType.AUDIO_AND_VIDEO : MediaType.AUDIO);
+    await engine.publishStream(MediaType.AUDIO);
 
     setVoiceStatus("正在邀请 Mia 进入房间...");
     const startResponse = await fetch("/api/agent-rtc/start", {
@@ -3985,11 +3978,7 @@ export default function AgentStudyClient() {
     voiceSessionActiveRef.current = true;
     voiceManualStopRef.current = false;
     setIsVoiceSessionActive(true);
-    setVoiceStatus(
-      hasVisualTrack
-        ? "RTC 智能体语音已开启，Mia 正在接收当前页面画面。"
-        : "RTC 智能体语音已开启，但当前页面视觉流未发布。"
-    );
+    setVoiceStatus("RTC 智能体纯语音模式已开启。");
   };
 
   const beginVoiceStreamSession = async () => {
