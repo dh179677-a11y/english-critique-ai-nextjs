@@ -200,12 +200,15 @@ export const getRtcAgentConfig = (): VoiceChatConfig => {
     botId,
     ak,
     sk,
-    modelName: getEnv("DOUBAO_AGENT_MODEL") || "doubao-seed-2-0-lite-260215",
-    ttsSpeaker: getEnv("DOUBAO_AGENT_TTS_SPEAKER") || "zh_female_yingyujiaoyu_mars_bigtts",
-    ttsSpeechRate: getNumberEnv("DOUBAO_AGENT_TTS_SPEECH_RATE", -4, -50, 50),
+    modelName: getEnv("DOUBAO_AGENT_MODEL") || "doubao-seed-2-0-pro-260215",
+    ttsSpeaker:
+      getEnv("DOUBAO_AGENT_TTS_SPEAKER") || "ICL_zh_female_lingdongxinxin_cs_tob",
+    ttsSpeechRate: getNumberEnv("DOUBAO_AGENT_TTS_SPEECH_RATE", 0, -50, 50),
     ttsLoudnessRate: getNumberEnv("DOUBAO_AGENT_TTS_LOUDNESS_RATE", 0, -50, 50),
-    ttsPitch: getNumberEnv("DOUBAO_AGENT_TTS_PITCH", -2, -12, 12),
-    welcomeMessage: getEnv("DOUBAO_AGENT_WELCOME_MESSAGE") || pickAgentWelcomeMessage(),
+    ttsPitch: getNumberEnv("DOUBAO_AGENT_TTS_PITCH", 0, -12, 12),
+    welcomeMessage:
+      getEnv("DOUBAO_AGENT_WELCOME_MESSAGE") ||
+      "你好小朋友，你的小脑袋里又有什么问题啦？",
   };
 };
 
@@ -307,7 +310,9 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
         Provider: "volcano",
         ProviderParams: {
           Mode: "bigmodel",
-          ApiResourceId: "volc.seedasr.sauc.duration",
+          Credential: {
+            ApiResourceId: "volc.seedasr.sauc.duration",
+          },
           StreamMode: 2,
           VolcanoASRParameters: JSON.stringify({
             request: {
@@ -325,10 +330,10 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       },
       LLMConfig: {
         Mode: "ArkV3",
-        BotId: config.botId,
         ModelName: config.modelName,
         SystemMessages: [buildSystemPrompt(session.lessonState || "")],
         ThinkingType: "disabled",
+        Prefill: false,
         VisionConfig: {
           Enable: true,
         },
@@ -362,7 +367,7 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       InterruptMode: 0,
       SubtitleConfig: {
         DisableRTSSubtitle: false,
-        SubtitleMode: 0,
+        SubtitleMode: 1,
       },
       FunctionCallingConfig: {},
       WebSearchAgentConfig: {},
@@ -373,10 +378,9 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       TargetUserId: [session.userId],
       UserId: session.agentUserId,
       WelcomeMessage: session.welcomeMessage ?? config.welcomeMessage,
-      EnableConversationStateCallback: true,
+      EnableConversationStateCallback: false,
       VoicePrint: {
-        MetaList: null,
-        VoicePrintList: null,
+        Mode: 0,
       },
     },
   };
