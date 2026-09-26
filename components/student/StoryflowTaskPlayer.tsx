@@ -1290,6 +1290,8 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const coachRemoteAudioClearTimerRef = useRef<number | null>(null);
   const coachExpectedSpeechRef = useRef("");
   const coachRecentSpeechEchoTextsRef = useRef<string[]>([]);
+  const pendingStudentSpeechDuringCoachRef = useRef("");
+  const flushingPendingStudentSpeechRef = useRef(false);
   const localStudentSpeechRecognitionRef = useRef<LocalStudentSpeechRecognition | null>(null);
   const localStudentSpeechRestartTimerRef = useRef<number | null>(null);
   const localStudentSpeechShouldRunRef = useRef(false);
@@ -2353,6 +2355,8 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     coachSessionActiveRef.current = false;
     coachManualStopRef.current = true;
     coachRequestInFlightRef.current = false;
+    pendingStudentSpeechDuringCoachRef.current = "";
+    flushingPendingStudentSpeechRef.current = false;
     clearCoachRtcShadowPromptTimer();
     void interruptCoachRtcOutput();
     stopShadowAudioPlayback({ resumeRtcMic: false });
@@ -2910,6 +2914,43 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
   const isCoachRemoteAudioActive = () => Date.now() < coachRemoteAudioActiveUntilRef.current;
 
+  const flushPendingStudentSpeechAfterCoach = async () => {
+    const pendingSpeech = pendingStudentSpeechDuringCoachRef.current.trim();
+    if (
+      !pendingSpeech ||
+      isCoachRemoteAudioActive() ||
+      flushingPendingStudentSpeechRef.current ||
+      !coachRtcStartedRef.current ||
+      coachManualStopRef.current
+    ) {
+      return;
+    }
+
+    pendingStudentSpeechDuringCoachRef.current = "";
+    flushingPendingStudentSpeechRef.current = true;
+    setIsCoachThinking(true);
+    setCoachInterimText("Mia 已听到你刚才的话，正在回答...");
+    try {
+      const sent = await sendCoachRtcAgentControlMessage(
+        [
+          `学生在你刚才播报期间说：${pendingSpeech}`,
+          buildCoachRtcLessonStatePrompt(),
+          "现在播报已经结束。请根据学生刚才说的话继续当前练习，只用 RTC 智能体语音简短回答。",
+        ].join("\n")
+      );
+      if (!sent) {
+        setCoachError("RTC 智能体尚未准备好，请重新开启实时语音。");
+        setCoachInterimText("");
+      }
+    } catch (error) {
+      setCoachError(error instanceof Error ? error.message : "刚才的语音发送失败。");
+      setCoachInterimText("");
+    } finally {
+      flushingPendingStudentSpeechRef.current = false;
+      setIsCoachThinking(false);
+    }
+  };
+
   const markCoachRemoteAudioActive = (durationMs = 4200) => {
     if (typeof window === "undefined") return;
     const activeUntil = Date.now() + durationMs;
@@ -2925,6 +2966,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       coachRemoteAudioClearTimerRef.current = null;
       if (!isCoachRemoteAudioActive()) {
         setIsCoachSpeaking(false);
+        void flushPendingStudentSpeechAfterCoach();
       }
     }, durationMs + 160);
   };
@@ -3051,8 +3093,8 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         const result = event.results[index];
         const text = normalizeAiContextText(result?.[0]?.transcript || "", 1200);
         if (!text) continue;
-        if (isCoachRemoteAudioActive()) continue;
         if (isLikelyCoachEchoLocalStudentTranscript(text)) continue;
+        const correctedText = correctCoachRtcTranscriptAgainstCurrentText(text);
         localStudentSpeechSequenceRef.current += 1;
         const transcriptId = getStableCoachRtcTranscriptId({
           source: "local_student_speech",
@@ -3064,9 +3106,16 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         upsertCoachRtcTranscriptMessage({
           id: transcriptId,
           role: "student",
-          text: correctCoachRtcTranscriptAgainstCurrentText(text),
+          text: correctedText,
           definite: Boolean(result.isFinal),
         });
+        if (isCoachRemoteAudioActive()) {
+          if (result.isFinal) {
+            pendingStudentSpeechDuringCoachRef.current = correctedText;
+            setCoachInterimText("已记住你刚才的话，等 Mia 说完后自动发送。");
+          }
+          continue;
+        }
       }
     };
     recognition.onerror = () => {
@@ -3685,6 +3734,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     coachRtcLiveTranscriptIdsRef.current = {};
     coachRtcRecentTranscriptRef.current = {};
     coachRecentSpeechEchoTextsRef.current = [];
+    pendingStudentSpeechDuringCoachRef.current = "";
 
     const playRemoteAudio = (userId?: string) => {
       if (!userId || userId === sessionPayload.userId) return;
@@ -4163,7 +4213,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                 </button>
                 <div className="hidden min-w-[4.6rem] items-center text-xs font-black text-slate-500 sm:flex">
                   {isCoachSpeaking
-                    ? "可打断"
+                    ? "AI说话中，请稍候"
                     : isCoachThinking
                     ? "AI 回复中"
                     : isCoachListening
@@ -5353,7 +5403,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                       <path d="M12 16.5V20" />
                     </svg>
                   </span>
-                  {isCoachSpeaking ? "可打断" : isCoachListening ? "正在听" : isCoachSessionActive ? "实时语音中" : "实时语音"}
+                  {isCoachSpeaking ? "AI说话中，请稍候" : isCoachListening ? "正在听" : isCoachSessionActive ? "实时语音中" : "实时语音"}
                 </button>
               </div>
             </aside>
@@ -5820,7 +5870,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
                         <path d="M12 16.5V20" />
                       </svg>
                     </span>
-                    {isCoachSpeaking ? "可打断" : isCoachListening ? "正在听" : isCoachSessionActive ? "实时语音中" : "实时语音"}
+                    {isCoachSpeaking ? "AI说话中，请稍候" : isCoachListening ? "正在听" : isCoachSessionActive ? "实时语音中" : "实时语音"}
                   </button>
                 </div>
               </aside>
