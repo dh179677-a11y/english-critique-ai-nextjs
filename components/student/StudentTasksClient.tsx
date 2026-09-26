@@ -1,36 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 
-import type { SessionUser } from "@/lib/clientAuth";
+import type { StudentTaskListItem } from "@/app/tasks/taskListData";
 import {
-  getStudentStoryflowAssignments,
-  hydrateStudentStoryflowAssignments,
-  primeStudentStoryflowAssignments,
-  type StoryflowAssignment,
-} from "@/lib/storyflowAssignments";
-import {
-  getTeacherStoryflowDocuments,
-  hydrateAccessibleStoryflowDocumentsForTeachers,
-  primeAccessibleTeacherStoryflowDocuments,
-  type StoryflowDocument,
   type StoryflowFolder,
   type StoryflowStudentTaskDisplayMode,
 } from "@/lib/storyflowStore";
 
-export type StudentTaskCard = StoryflowAssignment & {
-  folderId?: string | null;
-  documentSortOrder: number;
-  lastStudiedAt: number;
-  coverObjectKey: string;
-  coverImageUrl: string;
-};
+export type StudentTaskCard = StudentTaskListItem;
 
 interface StudentTasksClientProps {
-  session: SessionUser;
   initialTaskCards: StudentTaskCard[];
-  initialDocumentsByTeacher: Record<string, StoryflowDocument[]>;
   initialFoldersByTeacher: Record<string, StoryflowFolder[]>;
   initialDisplayMode: StoryflowStudentTaskDisplayMode;
 }
@@ -71,29 +53,6 @@ const formatDate = (timestamp: number) =>
     day: "numeric",
   }).format(new Date(timestamp));
 
-const getAssignmentLastStudiedAt = (task: StoryflowAssignment) =>
-  Math.max(
-    task.shadowSubmission?.completedAt || 0,
-    task.speakingSubmission?.completedAt || 0
-  );
-
-const getDocumentSortValue = (document?: StoryflowDocument | null) =>
-  typeof document?.sortOrder === "number" && Number.isFinite(document.sortOrder)
-    ? document.sortOrder
-    : document?.updatedAt || document?.createdAt || 0;
-
-const getDocumentCoverImageUrl = (document?: StoryflowDocument | null) => {
-  if (!document) return "";
-
-  const localImage = document.images?.[0];
-  if (isDisplayUrl(localImage)) return localImage || "";
-  if (isDisplayUrl(document.thumbnail)) return document.thumbnail || "";
-
-  return getStoryflowFileProxyUrl(
-    document.pageObjectKeys?.[0] || document.thumbnailObjectKey || ""
-  );
-};
-
 const getFolderCoverImageUrl = (
   folder: StoryflowFolder | undefined,
   tasks: StudentTaskCard[]
@@ -103,76 +62,14 @@ const getFolderCoverImageUrl = (
   return tasks.find((task) => task.coverImageUrl)?.coverImageUrl || "";
 };
 
-const buildTaskCards = (tasks: StoryflowAssignment[]) =>
-  tasks.map((task) => {
-    const document = getTeacherStoryflowDocuments(task.teacherUsername).find(
-      (item) => item.id === task.documentId
-    );
-    return {
-      ...task,
-      folderId: document?.folderId || null,
-      documentSortOrder: getDocumentSortValue(document),
-      lastStudiedAt: getAssignmentLastStudiedAt(task),
-      coverObjectKey:
-        document?.pageObjectKeys?.[0] || document?.thumbnailObjectKey || "",
-      coverImageUrl: getDocumentCoverImageUrl(document),
-    } satisfies StudentTaskCard;
-  });
-
 export default function StudentTasksClient({
-  session,
   initialTaskCards,
-  initialDocumentsByTeacher,
   initialFoldersByTeacher,
   initialDisplayMode,
 }: StudentTasksClientProps) {
-  const [taskCards, setTaskCards] = useState<StudentTaskCard[]>(initialTaskCards);
-  const [foldersByTeacher, setFoldersByTeacher] =
-    useState<Record<string, StoryflowFolder[]>>(initialFoldersByTeacher);
+  const taskCards = initialTaskCards;
+  const foldersByTeacher = initialFoldersByTeacher;
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    primeStudentStoryflowAssignments(session.username, initialTaskCards);
-    Object.entries(initialDocumentsByTeacher).forEach(([teacherUsername, documents]) => {
-      primeAccessibleTeacherStoryflowDocuments(teacherUsername, documents);
-    });
-    setFoldersByTeacher(initialFoldersByTeacher);
-    setTaskCards(buildTaskCards(getStudentStoryflowAssignments(session.username)));
-  }, [
-    initialDocumentsByTeacher,
-    initialFoldersByTeacher,
-    initialTaskCards,
-    session.username,
-  ]);
-
-  useEffect(() => {
-    let disposed = false;
-
-    const refreshTaskCards = () => {
-      if (!disposed) {
-        setTaskCards(buildTaskCards(getStudentStoryflowAssignments(session.username)));
-      }
-    };
-
-    refreshTaskCards();
-
-    void hydrateStudentStoryflowAssignments(session.username)
-      .then((assignments) =>
-        hydrateAccessibleStoryflowDocumentsForTeachers(
-          assignments.map((item) => item.teacherUsername)
-        )
-      )
-      .then(() => {
-        refreshTaskCards();
-      })
-      .catch(() => {
-        refreshTaskCards();
-      });
-
-    return () => {
-      disposed = true;
-    };
-  }, [session.username]);
 
   const courseLevelGroups = useMemo<CourseLevelGroup[]>(() => {
     const groups = new Map<string, CourseLevelGroup>();
@@ -230,6 +127,7 @@ export default function StudentTasksClient({
     badge,
     meta,
     fallback,
+    priority = false,
   }: {
     imageUrl: string;
     title: string;
@@ -237,12 +135,18 @@ export default function StudentTasksClient({
     badge: string;
     meta: string;
     fallback: string;
+    priority?: boolean;
   }) => (
       <div className="relative aspect-[3/4] overflow-hidden rounded-[1.35rem] bg-slate-100">
         {imageUrl ? (
           <img
             src={imageUrl}
             alt={alt}
+            width={480}
+            height={640}
+            loading={priority ? "eager" : "lazy"}
+            fetchPriority={priority ? "high" : "auto"}
+            decoding="async"
             className="h-full w-full object-cover object-center"
           />
         ) : (
@@ -308,7 +212,7 @@ export default function StudentTasksClient({
     );
   };
 
-  const renderTaskCard = (task: StudentTaskCard) =>
+  const renderTaskCard = (task: StudentTaskCard, priority = false) =>
     renderCourseCardShell({
       cardKey: task.id,
       href: `/tasks/${task.id}`,
@@ -319,6 +223,7 @@ export default function StudentTasksClient({
         badge: task.lastStudiedAt > 0 ? "上次学过" : "图文导学",
         meta: formatDate(task.createdAt),
         fallback: "牛津树绘本",
+        priority,
       }),
       detailText: <>发布老师：{task.teacherDisplayName}</>,
       actionText: task.lastStudiedAt > 0 ? "继续学习" : "开始练习",
@@ -330,6 +235,10 @@ export default function StudentTasksClient({
         <img
           src={group.coverImageUrl}
           alt={group.name}
+          width={80}
+          height={80}
+          loading="lazy"
+          decoding="async"
           className="h-full w-full object-cover"
         />
       ) : (
@@ -382,7 +291,7 @@ export default function StudentTasksClient({
         </button>
       </div>
       <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {group.tasks.map((task) => renderTaskCard(task))}
+        {group.tasks.map((task, index) => renderTaskCard(task, index === 0))}
       </div>
     </section>
   );
@@ -393,7 +302,7 @@ export default function StudentTasksClient({
 
     return (
       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {courseLevelGroups.map((group) =>
+        {courseLevelGroups.map((group, index) =>
           renderCourseCardShell({
             cardKey: group.key,
             onClick: () => setSelectedGroupKey(group.key),
@@ -404,6 +313,7 @@ export default function StudentTasksClient({
               badge: group.latestStudiedAt > 0 ? "上次学过" : "图文导学",
               meta: `${group.tasks.length} 本绘本`,
               fallback: "牛津树绘本",
+              priority: index === 0,
             }),
             detailText: <>共 {group.tasks.length} 本绘本</>,
             actionText: "进入学习",
@@ -426,7 +336,11 @@ export default function StudentTasksClient({
           >
             {renderFolderHeader(group, true)}
             <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {group.tasks.slice(0, 3).map((task) => renderTaskCard(task))}
+              {group.tasks
+                .slice(0, 3)
+                .map((task, taskIndex) =>
+                  renderTaskCard(task, group === courseLevelGroups[0] && taskIndex === 0)
+                )}
             </div>
           </section>
         ))}
