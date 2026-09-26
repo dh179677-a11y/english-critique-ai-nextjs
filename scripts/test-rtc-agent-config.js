@@ -13,6 +13,8 @@ assert.doesNotMatch(source, /LLMConfig:\s*{[\s\S]*?BotId:/);
 assert.match(source, /Prefill: false/);
 assert.match(source, /VisionConfig:\s*{\s*Enable: false/s);
 assert.match(source, /SubtitleMode: 1/);
+assert.match(source, /InterruptMode: 1/);
+assert.doesNotMatch(source, /Config:\s*{[\s\S]*?InterruptMode: 0/);
 assert.match(source, /EnableConversationStateCallback: false/);
 assert.match(source, /VoicePrint:\s*{\s*Mode: 0/s);
 assert.match(source, /ICL_zh_female_lingdongxinxin_cs_tob/);
