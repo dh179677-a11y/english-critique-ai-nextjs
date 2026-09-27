@@ -301,6 +301,9 @@ const isShadowRtcLessonState = (lessonState: string) =>
 
 export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
   const config = getRtcAgentConfig();
+  const isEnglishSpeakingPractice = /任务模式：看图说话|【看图说话RTC练习】/.test(
+    session.lessonState || ""
+  );
   return {
     AppId: config.appId,
     RoomId: session.roomId,
@@ -315,6 +318,13 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
           },
           StreamMode: 2,
           VolcanoASRParameters: JSON.stringify({
+            ...(isEnglishSpeakingPractice
+              ? {
+                  audio: {
+                    language: "en-US",
+                  },
+                }
+              : {}),
             request: {
               enable_nonstream: true,
             },
