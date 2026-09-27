@@ -31,7 +31,6 @@ import {
 import {
   getCoachAudioClearDelayMs,
   getStoryflowSpeechRecognitionLang,
-  shouldScheduleStudentSpeechFallback,
   shouldSendLocalSpeechFallback,
 } from "@/lib/storyflowRtcTurn";
 import type { AnalysisResult } from "@/types";
@@ -2907,49 +2906,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     clearLocalStudentSpeechFallback();
   };
 
-  const scheduleStudentSpeechFallback = (transcript: string) => {
-    const capturedAt = Date.now();
-    clearLocalStudentSpeechFallback();
-    localStudentSpeechFallbackTimerRef.current = window.setTimeout(() => {
-      localStudentSpeechFallbackTimerRef.current = null;
-      if (
-        !shouldSendLocalSpeechFallback({
-          capturedAt,
-          lastCoachActivityAt: lastCoachReplyActivityAtRef.current,
-          isCoachAudioActive: isCoachRemoteAudioActive(),
-          transcript,
-        }) ||
-        !coachRtcStartedRef.current ||
-        coachManualStopRef.current
-      ) {
-        return;
-      }
-      setCoachInterimText("Mia 已听到，正在回答...");
-      void sendCoachRtcAgentControlMessage(
-        [
-          `学生刚刚说：${transcript}`,
-          buildCoachRtcLessonStatePrompt(),
-          "RTC 语音识别未及时触发回复。请根据学生这句话继续当前练习，只用 RTC 智能体语音简短回答。",
-        ].join("\n")
-      ).catch((error) => {
-        setCoachError(error instanceof Error ? error.message : "刚才的语音发送失败。");
-      });
-    }, 2400);
-  };
-
-  const scheduleLocalStudentSpeechRestart = (delayMs = 500) => {
-    if (localStudentSpeechRestartTimerRef.current) {
-      window.clearTimeout(localStudentSpeechRestartTimerRef.current);
-    }
-    if (!localStudentSpeechShouldRunRef.current || !coachRtcStartedRef.current || coachManualStopRef.current) {
-      return;
-    }
-    localStudentSpeechRestartTimerRef.current = window.setTimeout(() => {
-      localStudentSpeechRestartTimerRef.current = null;
-      startLocalStudentSpeechSubtitles();
-    }, delayMs);
-  };
-
   const stopLocalStudentSpeechSubtitles = () => {
     localStudentSpeechShouldRunRef.current = false;
     clearLocalStudentSpeechFallback();
@@ -3180,24 +3136,49 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           }
           continue;
         }
-        if (shouldScheduleStudentSpeechFallback(resolvedTaskMode, Boolean(result.isFinal))) {
-          scheduleStudentSpeechFallback(correctedText);
+        if (result.isFinal && resolvedTaskMode === "speaking") {
+          const capturedAt = Date.now();
+          clearLocalStudentSpeechFallback();
+          localStudentSpeechFallbackTimerRef.current = window.setTimeout(() => {
+            localStudentSpeechFallbackTimerRef.current = null;
+            if (
+              !shouldSendLocalSpeechFallback({
+                capturedAt,
+                lastCoachActivityAt: lastCoachReplyActivityAtRef.current,
+                isCoachAudioActive: isCoachRemoteAudioActive(),
+                transcript: correctedText,
+              }) ||
+              !coachRtcStartedRef.current ||
+              coachManualStopRef.current
+            ) {
+              return;
+            }
+            setCoachInterimText("Mia 已听到，正在回答...");
+            void sendCoachRtcAgentControlMessage(
+              [
+                `学生刚刚说：${correctedText}`,
+                buildCoachRtcLessonStatePrompt(),
+                "RTC 语音识别未及时触发回复。请根据学生这句话继续当前练习，只用 RTC 智能体语音简短回答。",
+              ].join("\n")
+            ).catch((error) => {
+              setCoachError(error instanceof Error ? error.message : "刚才的语音发送失败。");
+            });
+          }, 2400);
         }
       }
     };
     recognition.onerror = () => {
-      localStudentSpeechRecognitionRef.current = null;
-      setCoachInterimText("语音识别正在重新连接...");
-      try {
-        recognition.abort?.();
-      } catch {
-        // The recognition instance may already be closed.
-      }
-      scheduleLocalStudentSpeechRestart(700);
+      // Local recognition is only a subtitle mirror. RTC voice remains the source of truth.
     };
     recognition.onend = () => {
       localStudentSpeechRecognitionRef.current = null;
-      scheduleLocalStudentSpeechRestart();
+      if (!localStudentSpeechShouldRunRef.current || !coachRtcStartedRef.current || coachManualStopRef.current) {
+        return;
+      }
+      localStudentSpeechRestartTimerRef.current = window.setTimeout(() => {
+        localStudentSpeechRestartTimerRef.current = null;
+        startLocalStudentSpeechSubtitles();
+      }, 500);
     };
 
     try {
@@ -3878,9 +3859,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         continueIntensiveAfterReconnectWelcome(role, correctedText, definite);
         if (role === "student") {
           consumePendingCoachActionIfConfirmed(correctedText);
-          if (shouldScheduleStudentSpeechFallback(resolvedTaskMode, definite)) {
-            scheduleStudentSpeechFallback(correctedText);
-          }
           setCoachInterimText("Mia 正在听...");
         } else {
           noteCoachReplyActivity();
@@ -3918,9 +3896,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         continueIntensiveAfterReconnectWelcome(item.role, correctedText, item.definite);
         if (item.role === "student") {
           consumePendingCoachActionIfConfirmed(correctedText);
-          if (shouldScheduleStudentSpeechFallback(resolvedTaskMode, item.definite)) {
-            scheduleStudentSpeechFallback(correctedText);
-          }
         } else {
           noteCoachReplyActivity();
           markCoachRemoteAudioActive(item.definite ? 1800 : 3600);

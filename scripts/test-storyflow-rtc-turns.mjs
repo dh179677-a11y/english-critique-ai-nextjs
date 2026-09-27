@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   getCoachAudioClearDelayMs,
   getStoryflowSpeechRecognitionLang,
-  shouldScheduleStudentSpeechFallback,
   shouldSendLocalSpeechFallback,
 } from "../lib/storyflowRtcTurn.ts";
 
@@ -13,14 +12,6 @@ assert.equal(
   "speaking practice must recognize the child's English as English"
 );
 assert.equal(getStoryflowSpeechRecognitionLang("intensive"), "zh-CN");
-
-assert.equal(shouldScheduleStudentSpeechFallback("speaking", true), true);
-assert.equal(
-  shouldScheduleStudentSpeechFallback("intensive", true),
-  true,
-  "a final student subtitle in intensive mode must also get a no-reply fallback"
-);
-assert.equal(shouldScheduleStudentSpeechFallback("intensive", false), false);
 
 assert.equal(
   getCoachAudioClearDelayMs(6_000, 2_000, 160),
