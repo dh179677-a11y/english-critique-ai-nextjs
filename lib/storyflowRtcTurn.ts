@@ -3,6 +3,11 @@ export type StoryflowRtcSpeechMode = "animation" | "intensive" | "shadow" | "spe
 export const getStoryflowSpeechRecognitionLang = (mode: StoryflowRtcSpeechMode) =>
   mode === "speaking" || mode === "shadow" ? "en-US" : "zh-CN";
 
+export const shouldScheduleStudentSpeechFallback = (
+  mode: StoryflowRtcSpeechMode,
+  isFinal: boolean
+) => isFinal && (mode === "speaking" || mode === "intensive");
+
 export const getCoachAudioClearDelayMs = (
   activeUntil: number,
   now: number,
