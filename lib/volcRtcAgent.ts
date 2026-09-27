@@ -364,7 +364,7 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
           }),
         },
       },
-      InterruptMode: 1,
+      InterruptMode: 0,
       SubtitleConfig: {
         DisableRTSSubtitle: false,
         SubtitleMode: 1,
