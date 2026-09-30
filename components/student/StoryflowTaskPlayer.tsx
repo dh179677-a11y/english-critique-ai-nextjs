@@ -28,6 +28,9 @@ import {
   buildPreviouslyTaughtVocabulary,
   formatPreviouslyTaughtVocabularyPrompt,
 } from "@/lib/intensiveVocabularyMemory";
+import {
+  shouldAutoAdvanceIntensivePage,
+} from "@/lib/intensiveAutoAdvance";
 import type { AnalysisResult } from "@/types";
 
 type StoryflowTaskPlayerProps = {
@@ -1297,15 +1300,19 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const localStudentSpeechSequenceRef = useRef(0);
   const coachShadowPromptTimerRef = useRef<number | null>(null);
   const coachShadowPromptKeyRef = useRef("");
+  const intensiveAutoAdvanceTimerRef = useRef<number | null>(null);
+  const intensiveAutoAdvanceKeyRef = useRef("");
   const animationVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const coachLatestNavigationRef = useRef<{
     canNext: boolean;
     mode: TaskMode;
+    pageIndex: number;
     pagesLength: number;
     shadowStepsLength: number;
   }>({
     canNext: false,
     mode: "speaking",
+    pageIndex: 0,
     pagesLength: 0,
     shadowStepsLength: 0,
   });
@@ -2210,6 +2217,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     coachLatestNavigationRef.current = {
       canNext,
       mode: resolvedTaskMode,
+      pageIndex: safeIndex,
       pagesLength: pages.length,
       shadowStepsLength: shadowNavigationSteps.length,
     };
@@ -2354,6 +2362,11 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     coachManualStopRef.current = true;
     coachRequestInFlightRef.current = false;
     clearCoachRtcShadowPromptTimer();
+    if (intensiveAutoAdvanceTimerRef.current) {
+      window.clearTimeout(intensiveAutoAdvanceTimerRef.current);
+      intensiveAutoAdvanceTimerRef.current = null;
+    }
+    intensiveAutoAdvanceKeyRef.current = "";
     void interruptCoachRtcOutput();
     stopShadowAudioPlayback({ resumeRtcMic: false });
     stopShadowRecording();
@@ -2497,9 +2510,9 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
             intensiveVocabularyMemoryPrompt,
             "清单中的词族已经在本次绘本前页完成精讲。当前页再次出现时只能简短回顾，不得重新完整讲解；优先讲当前页第一次出现的新重点词。",
             "绘本精讲规则：上传资料已经由老师完成。只使用当前屏幕画面和当前页可信原文逐页讲解，原文是唯一语言依据，画面只用于确定词义和故事语境。",
-            "需要完整覆盖当前页原文。双页按左页、右页顺序讲完重点单词、语法、重点句和应用后，整个跨页最多问一个与英文原文直接相关的问题。",
-            "重点句用儿童习得方式讲：先结合故事说清句意，每个跨页最多点出一个有用的表达规律，再用一到两个短例句或替换词展示应用；没有必要的语法点时不要强行讲。",
-            "禁止让学生练发音、跟读或朗读；禁止让学生描述画面、自由编故事或预测剧情。学生回答唯一的原文问题后，简短反馈并提示翻页。",
+            "需要完整覆盖当前页原文。双页按左页、右页朗读完整，再用一句中文概括故事，并且整个跨页只选择一个最值得学习的单词、短语或句型。不要逐项罗列词义、词性、搭配和语法。",
+            "讲解后只问一个与英文原文直接相关的短问题。学生回答后具体反馈；若还有下一页，回复末尾逐字说“这一页讲完了，我们自动进入下一页。”；最后一页则总结本书，不说自动翻页提示。",
+            "禁止让学生练发音、跟读或朗读；禁止让学生描述画面、自由编故事或预测剧情。",
           ]
         : resolvedTaskMode === "speaking"
         ? [
@@ -2936,6 +2949,54 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       coachRemoteAudioClearTimerRef.current = null;
     }
     setIsCoachSpeaking(false);
+  };
+
+  const scheduleIntensiveAutoAdvance = (
+    role: AiCoachMessage["role"],
+    text: string,
+    definite: boolean
+  ) => {
+    const navigation = coachLatestNavigationRef.current;
+    if (
+      !shouldAutoAdvanceIntensivePage({
+        mode: navigation.mode,
+        role,
+        definite,
+        text,
+        canNext: navigation.canNext,
+      })
+    ) {
+      return;
+    }
+
+    const scheduledPageIndex = navigation.pageIndex;
+    const cueKey = `${scheduledPageIndex}:${normalizeCoachIntentText(text)}`;
+    if (intensiveAutoAdvanceKeyRef.current === cueKey) return;
+    intensiveAutoAdvanceKeyRef.current = cueKey;
+
+    if (intensiveAutoAdvanceTimerRef.current) {
+      window.clearTimeout(intensiveAutoAdvanceTimerRef.current);
+    }
+    const remainingAudioMs = Math.max(0, coachRemoteAudioActiveUntilRef.current - Date.now());
+    intensiveAutoAdvanceTimerRef.current = window.setTimeout(() => {
+      intensiveAutoAdvanceTimerRef.current = null;
+      const latestNavigation = coachLatestNavigationRef.current;
+      if (
+        latestNavigation.mode !== "intensive" ||
+        !latestNavigation.canNext ||
+        latestNavigation.pageIndex !== scheduledPageIndex ||
+        coachManualStopRef.current
+      ) {
+        return;
+      }
+
+      setHintStage(0);
+      setPageIndex((currentIndex) =>
+        currentIndex === scheduledPageIndex
+          ? Math.min(currentIndex + 1, latestNavigation.pagesLength - 1)
+          : currentIndex
+      );
+    }, Math.max(900, remainingAudioMs + 450));
   };
 
   const getLocalTranscriptSimilarity = (left: string, right: string, forcedChunkSize?: number) => {
@@ -3629,9 +3690,9 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       resolvedTaskMode === "intensive"
         ? [
             intensiveLanguageTeachingFlowPrompt,
-            "请立即从当前页开始语言知识精讲：自然朗读原文一次，然后结合画面和故事语境讲重点单词、语法、重点句结构及应用例句。不要让学生描述画面。",
-            "如果是双页，按左页再右页讲解；两侧全部讲完后整个跨页最多问一个与英文原文直接相关的问题。不要要求学生跟读、朗读或练习发音。",
-            "学生回答后简短反馈并提示翻页；如果没有学生回复或真实翻页事件，就停止说话，不要编后续内容。",
+            "请立即从当前页开始语言知识精讲：自然朗读完整原文，用一句中文概括故事，再只讲一个最值得学习的单词、短语或句型，并给一个儿童生活中的短例子。不要让学生描述画面。",
+            "如果是双页，按左页再右页朗读完整；整个跨页只讲一个主要知识点并只问一个与英文原文直接相关的短问题。不要要求学生跟读、朗读或练习发音。",
+            "学生回答后做一句具体反馈。若还有下一页，回复末尾逐字说“这一页讲完了，我们自动进入下一页。”；最后一页总结本书，不说这句话。没有学生回复时停止说话，不要编后续内容。",
           ].filter(Boolean).join("\n")
         : "请继续看图说话练习：只围绕当前唯一有效页，先引导学生观察和自己表达，不要直接给完整原文。清空上一页目标词和封面标题，不要继续讲封面或上一页。不要等待学生再次提醒。",
     ].join("\n");
@@ -3761,7 +3822,10 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           setCoachInterimText("Mia 正在听...");
         } else {
           markCoachRemoteAudioActive(definite ? 1800 : 3600);
-          if (definite) applyCoachUiActionFromReply(text);
+          if (definite) {
+            applyCoachUiActionFromReply(text);
+            scheduleIntensiveAutoAdvance(role, text, definite);
+          }
           setCoachInterimText("正在播放 Mia 的声音...");
         }
       });
@@ -3796,7 +3860,10 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           consumePendingCoachActionIfConfirmed(correctedText);
         } else {
           markCoachRemoteAudioActive(item.definite ? 1800 : 3600);
-          if (item.definite) applyCoachUiActionFromReply(correctedText);
+          if (item.definite) {
+            applyCoachUiActionFromReply(correctedText);
+            scheduleIntensiveAutoAdvance(item.role, correctedText, item.definite);
+          }
         }
       });
       if (items.length) {
@@ -4779,6 +4846,14 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
 
     lastCoachRtcTaskModeRef.current = resolvedTaskMode;
   }, [resolvedTaskMode]);
+
+  useEffect(() => {
+    if (intensiveAutoAdvanceTimerRef.current) {
+      window.clearTimeout(intensiveAutoAdvanceTimerRef.current);
+      intensiveAutoAdvanceTimerRef.current = null;
+    }
+    intensiveAutoAdvanceKeyRef.current = "";
+  }, [resolvedTaskMode, safeIndex]);
 
   useEffect(() => {
     if (
