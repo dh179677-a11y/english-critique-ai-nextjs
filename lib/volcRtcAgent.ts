@@ -22,24 +22,16 @@ export type RtcAgentStartRequest = RtcAgentSession & {
 type VoiceChatConfig = {
   appId: string;
   appKey: string;
-  botId: string;
   ak: string;
   sk: string;
-  modelName: string;
-  ttsSpeaker: string;
-  ttsSpeechRate: number;
-  ttsLoudnessRate: number;
-  ttsPitch: number;
+  speechAppId: string;
+  speechToken: string;
+  arkEndpointId: string;
+  ttsVoiceType: string;
   welcomeMessage: string;
 };
 
 const getEnv = (name: string) => process.env[name]?.trim() || "";
-
-const getNumberEnv = (name: string, fallback: number, min: number, max: number) => {
-  const value = Number(getEnv(name));
-  if (!Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, value));
-};
 
 const agentWelcomeMessages = [
   "你好呀，我看到你上传了新的英语学习资料。今天我们一起慢慢读，读错了也没关系。",
@@ -174,15 +166,19 @@ const createRtcToken = ({
 export const getRtcAgentConfig = (): VoiceChatConfig => {
   const appId = getEnv("RTC_APP_ID") || getEnv("DOUBAO_REALTIME_APP_ID");
   const appKey = getEnv("RTC_APP_KEY") || getEnv("DOUBAO_REALTIME_APP_KEY");
-  const botId = getEnv("DOUBAO_AGENT_BOT_ID") || getEnv("RTC_AGENT_BOT_ID");
   const ak = getEnv("VOLC_ACCESS_KEY_ID") || getEnv("VOLC_ACCESSKEY");
   const sk = getEnv("VOLC_SECRET_ACCESS_KEY") || getEnv("VOLC_SECRETKEY");
+  const speechAppId = getEnv("VOLC_SPEECH_APP_ID");
+  const speechToken = getEnv("VOLC_SPEECH_TOKEN");
+  const arkEndpointId = getEnv("VOLC_ARK_ENDPOINT_ID");
   const missing = [
     ["RTC_APP_ID", appId],
     ["RTC_APP_KEY", appKey],
-    ["DOUBAO_AGENT_BOT_ID", botId],
     ["VOLC_ACCESS_KEY_ID", ak],
     ["VOLC_SECRET_ACCESS_KEY", sk],
+    ["VOLC_SPEECH_APP_ID", speechAppId],
+    ["VOLC_SPEECH_TOKEN", speechToken],
+    ["VOLC_ARK_ENDPOINT_ID", arkEndpointId],
   ]
     .filter(([, value]) => !value)
     .map(([name]) => name);
@@ -197,18 +193,14 @@ export const getRtcAgentConfig = (): VoiceChatConfig => {
   return {
     appId,
     appKey,
-    botId,
     ak,
     sk,
-    modelName: getEnv("DOUBAO_AGENT_MODEL") || "doubao-seed-2-0-pro-260215",
-    ttsSpeaker:
-      getEnv("DOUBAO_AGENT_TTS_SPEAKER") || "ICL_zh_female_lingdongxinxin_cs_tob",
-    ttsSpeechRate: getNumberEnv("DOUBAO_AGENT_TTS_SPEECH_RATE", 0, -50, 50),
-    ttsLoudnessRate: getNumberEnv("DOUBAO_AGENT_TTS_LOUDNESS_RATE", 0, -50, 50),
-    ttsPitch: getNumberEnv("DOUBAO_AGENT_TTS_PITCH", 0, -12, 12),
-    welcomeMessage:
-      getEnv("DOUBAO_AGENT_WELCOME_MESSAGE") ||
-      "你好小朋友，你的小脑袋里又有什么问题啦？",
+    speechAppId,
+    speechToken,
+    arkEndpointId,
+    ttsVoiceType:
+      getEnv("VOLC_TTS_VOICE_TYPE") || "zh_female_yingyujiaoyu_mars_bigtts",
+    welcomeMessage: getEnv("DOUBAO_AGENT_WELCOME_MESSAGE") || pickAgentWelcomeMessage(),
   };
 };
 
@@ -309,16 +301,9 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       ASRConfig: {
         Provider: "volcano",
         ProviderParams: {
-          Mode: "bigmodel",
-          Credential: {
-            ApiResourceId: "volc.seedasr.sauc.duration",
-          },
-          StreamMode: 2,
-          VolcanoASRParameters: JSON.stringify({
-            request: {
-              enable_nonstream: true,
-            },
-          }),
+          Mode: "smallmodel",
+          AppId: config.speechAppId,
+          Cluster: "volcengine_streaming_common",
         },
         VADConfig: {
           SilenceTime: 600,
@@ -330,10 +315,9 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       },
       LLMConfig: {
         Mode: "ArkV3",
-        ModelName: config.modelName,
+        EndPointId: config.arkEndpointId,
         SystemMessages: [buildSystemPrompt(session.lessonState || "")],
         ThinkingType: "disabled",
-        Prefill: false,
         VisionConfig: {
           Enable: false,
         },
@@ -345,23 +329,15 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       TTSConfig: {
         Provider: "volcano_bidirection",
         ProviderParams: {
-          Credential: {
-            ResourceId: "seed-tts-1.0",
+          app: {
+            appid: config.speechAppId,
+            token: config.speechToken,
           },
-          VolcanoTTSParameters: JSON.stringify({
-            req_params: {
-              speaker: config.ttsSpeaker,
-              audio_params: {
-                speech_rate: config.ttsSpeechRate,
-                loudness_rate: config.ttsLoudnessRate,
-              },
-              additions: {
-                post_process: {
-                  pitch: config.ttsPitch,
-                },
-              },
-            },
-          }),
+          audio: {
+            voice_type: config.ttsVoiceType,
+            speech_rate: 0,
+          },
+          ResourceId: "volc.service_type.10029",
         },
       },
       InterruptMode: 0,
@@ -378,9 +354,12 @@ export const buildStartVoiceChatPayload = (session: RtcAgentStartRequest) => {
       TargetUserId: [session.userId],
       UserId: session.agentUserId,
       WelcomeMessage: session.welcomeMessage ?? config.welcomeMessage,
-      EnableConversationStateCallback: false,
+      EnableConversationStateCallback: true,
+      ServerMessageURLForRTS: "https://yingba-english.cn/api/agent-rtc/events",
+      ServerMessageSignatureForRTS: "yingba-rtc-diagnostics-20260927",
       VoicePrint: {
-        Mode: 0,
+        MetaList: null,
+        VoicePrintList: null,
       },
     },
   };
@@ -412,7 +391,7 @@ const signRtcOpenApiHeaders = ({
 }) => {
   const region = "cn-north-1";
   const service = "rtc";
-  const version = "2025-06-01";
+  const version = "2024-12-01";
   const host = "rtc.volcengineapi.com";
   const xDate = getAmzDate(date);
   const shortDate = xDate.slice(0, 8);
@@ -467,7 +446,7 @@ const callRtcOpenApi = async (action: string, body: Record<string, unknown>) => 
   });
 
   const response = await fetch(
-    `https://rtc.volcengineapi.com?Action=${encodeURIComponent(action)}&Version=2025-06-01`,
+    `https://rtc.volcengineapi.com?Action=${encodeURIComponent(action)}&Version=2024-12-01`,
     {
       method: "POST",
       headers,
@@ -482,7 +461,14 @@ const callRtcOpenApi = async (action: string, body: Record<string, unknown>) => 
     parsed = text;
   }
 
-  if (!response.ok) {
+  const responseMetadataError =
+    typeof parsed === "object" &&
+    parsed &&
+    "ResponseMetadata" in parsed &&
+    typeof (parsed as { ResponseMetadata?: unknown }).ResponseMetadata === "object" &&
+    (parsed as { ResponseMetadata?: { Error?: unknown } }).ResponseMetadata?.Error;
+
+  if (!response.ok || responseMetadataError) {
     const message =
       typeof parsed === "object" && parsed && "ResponseMetadata" in parsed
         ? JSON.stringify((parsed as { ResponseMetadata?: unknown }).ResponseMetadata)

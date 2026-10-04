@@ -7,17 +7,23 @@ const source = fs.readFileSync(
   "utf8"
 );
 
-assert.match(source, /const version = "2025-06-01"/);
-assert.match(source, /Credential:\s*{\s*ApiResourceId: "volc\.seedasr\.sauc\.duration"/s);
-assert.doesNotMatch(source, /LLMConfig:\s*{[\s\S]*?BotId:/);
-assert.match(source, /Prefill: false/);
+assert.match(source, /const version = "2024-12-01"/);
+assert.match(source, /Mode: "smallmodel"/);
+assert.match(source, /AppId: config\.speechAppId/);
+assert.match(source, /Cluster: "volcengine_streaming_common"/);
+assert.match(source, /EndPointId: config\.arkEndpointId/);
+assert.doesNotMatch(source, /LLMConfig:\s*{[\s\S]*?ModelName:/);
 assert.match(source, /VisionConfig:\s*{\s*Enable: false/s);
 assert.match(source, /SubtitleMode: 1/);
-assert.match(source, /EnableConversationStateCallback: false/);
-assert.match(source, /VoicePrint:\s*{\s*Mode: 0/s);
-assert.match(source, /ICL_zh_female_lingdongxinxin_cs_tob/);
+assert.match(source, /appid: config\.speechAppId/);
+assert.match(source, /token: config\.speechToken/);
+assert.match(source, /voice_type: config\.ttsVoiceType/);
+assert.match(source, /ResourceId: "volc\.service_type\.10029"/);
+assert.match(source, /EnableConversationStateCallback: true/);
+assert.match(source, /ServerMessageURLForRTS:/);
+assert.match(source, /ResponseMetadata[\s\S]*?Error/);
 
-console.log("RTC agent config matches the conversational AI console template.");
+console.log("RTC agent config matches the working ordinary-RTC compatibility profile.");
 
 for (const componentPath of [
   "components/student/AgentStudyClient.tsx",
