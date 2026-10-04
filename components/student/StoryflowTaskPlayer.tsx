@@ -1302,6 +1302,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   const coachShadowPromptKeyRef = useRef("");
   const intensiveAutoAdvanceTimerRef = useRef<number | null>(null);
   const intensiveAutoAdvanceKeyRef = useRef("");
+  const intensiveStudentAnsweredRef = useRef(false);
   const animationVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const coachLatestNavigationRef = useRef<{
     canNext: boolean;
@@ -2367,6 +2368,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       intensiveAutoAdvanceTimerRef.current = null;
     }
     intensiveAutoAdvanceKeyRef.current = "";
+    intensiveStudentAnsweredRef.current = false;
     void interruptCoachRtcOutput();
     stopShadowAudioPlayback({ resumeRtcMic: false });
     stopShadowRecording();
@@ -2511,7 +2513,8 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
             "清单中的词族已经在本次绘本前页完成精讲。当前页再次出现时只能简短回顾，不得重新完整讲解；优先讲当前页第一次出现的新重点词。",
             "绘本精讲规则：上传资料已经由老师完成。只使用当前屏幕画面和当前页可信原文逐页讲解，原文是唯一语言依据，画面只用于确定词义和故事语境。",
             "需要完整覆盖当前页原文。双页按左页、右页朗读完整，再用一句中文概括故事，并且整个跨页只选择一个最值得学习的单词、短语或句型。不要逐项罗列词义、词性、搭配和语法。",
-            "讲解后只问一个与英文原文直接相关的短问题。学生回答后具体反馈；若还有下一页，回复末尾逐字说“这一页讲完了，我们自动进入下一页。”；最后一页则总结本书，不说自动翻页提示。",
+            "讲解时要像亲切的故事老师，用有画面感的中文串起人物、动作和情绪，自然穿插当前页英文原句；可以用‘这时’‘只见’‘糟糕’等自然转折，但不得补写画面和原文没有提供的剧情。",
+            "讲解后只问一个与英文原文直接相关的短问题。学生回答后只做一句具体反馈并自然收住；若还有下一页，前端会静默自动翻页，不要播报页码、翻页流程或自动切换提示；最后一页则总结本书。",
             "禁止让学生练发音、跟读或朗读；禁止让学生描述画面、自由编故事或预测剧情。",
           ]
         : resolvedTaskMode === "speaking"
@@ -2957,6 +2960,10 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
     definite: boolean
   ) => {
     const navigation = coachLatestNavigationRef.current;
+    if (navigation.mode === "intensive" && role === "student" && definite) {
+      intensiveStudentAnsweredRef.current = true;
+      return;
+    }
     if (
       !shouldAutoAdvanceIntensivePage({
         mode: navigation.mode,
@@ -2964,11 +2971,13 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
         definite,
         text,
         canNext: navigation.canNext,
+        studentAnswered: intensiveStudentAnsweredRef.current,
       })
     ) {
       return;
     }
 
+    intensiveStudentAnsweredRef.current = false;
     const scheduledPageIndex = navigation.pageIndex;
     const cueKey = `${scheduledPageIndex}:${normalizeCoachIntentText(text)}`;
     if (intensiveAutoAdvanceKeyRef.current === cueKey) return;
@@ -3690,9 +3699,9 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       resolvedTaskMode === "intensive"
         ? [
             intensiveLanguageTeachingFlowPrompt,
-            "请立即从当前页开始语言知识精讲：自然朗读完整原文，用一句中文概括故事，再只讲一个最值得学习的单词、短语或句型，并给一个儿童生活中的短例子。不要让学生描述画面。",
+            "请立即从当前页开始语言知识精讲：像亲切的故事老师一样，用有画面感的中文串起人物、动作和情绪，自然穿插并朗读完整英文原文；再只讲一个最值得学习的单词、短语或句型，并给一个儿童生活中的短例子。可以使用‘这时’‘只见’‘糟糕’等自然转折，但不要补写画面和原文没有提供的剧情，也不要让学生描述画面。",
             "如果是双页，按左页再右页朗读完整；整个跨页只讲一个主要知识点并只问一个与英文原文直接相关的短问题。不要要求学生跟读、朗读或练习发音。",
-            "学生回答后做一句具体反馈。若还有下一页，回复末尾逐字说“这一页讲完了，我们自动进入下一页。”；最后一页总结本书，不说这句话。没有学生回复时停止说话，不要编后续内容。",
+            "学生回答后只做一句具体反馈并自然收住。若还有下一页，前端会在反馈结束后静默自动翻页；不要播报页码、翻页流程或任何自动切换提示。最后一页简短总结本书。没有学生回复时停止说话，不要编后续内容。",
           ].filter(Boolean).join("\n")
         : "请继续看图说话练习：只围绕当前唯一有效页，先引导学生观察和自己表达，不要直接给完整原文。清空上一页目标词和封面标题，不要继续讲封面或上一页。不要等待学生再次提醒。",
     ].join("\n");
@@ -3817,6 +3826,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           definite,
         });
         continueIntensiveAfterReconnectWelcome(role, correctedText, definite);
+        scheduleIntensiveAutoAdvance(role, correctedText, definite);
         if (role === "student") {
           consumePendingCoachActionIfConfirmed(correctedText);
           setCoachInterimText("Mia 正在听...");
@@ -3824,7 +3834,6 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           markCoachRemoteAudioActive(definite ? 1800 : 3600);
           if (definite) {
             applyCoachUiActionFromReply(text);
-            scheduleIntensiveAutoAdvance(role, text, definite);
           }
           setCoachInterimText("正在播放 Mia 的声音...");
         }
@@ -3856,13 +3865,13 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           definite: item.definite,
         });
         continueIntensiveAfterReconnectWelcome(item.role, correctedText, item.definite);
+        scheduleIntensiveAutoAdvance(item.role, correctedText, item.definite);
         if (item.role === "student") {
           consumePendingCoachActionIfConfirmed(correctedText);
         } else {
           markCoachRemoteAudioActive(item.definite ? 1800 : 3600);
           if (item.definite) {
             applyCoachUiActionFromReply(correctedText);
-            scheduleIntensiveAutoAdvance(item.role, correctedText, item.definite);
           }
         }
       });
@@ -4082,6 +4091,10 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
           "帮我按顺序回忆原文",
         ];
   const coachSubtitleMessages = coachMessages.filter(isVoiceSubtitleMessage).slice(-12);
+  const coachLatestSubtitle = coachSubtitleMessages.at(-1);
+  const coachLatestSubtitleScrollKey = coachLatestSubtitle
+    ? `${coachLatestSubtitle.id}:${coachLatestSubtitle.text}`
+    : "";
   const getCoachVoiceSubtitleRecords = (): StoryflowVoiceSubtitleRecord[] => {
     const seen = new Set<string>();
     return coachMessages
@@ -4101,10 +4114,13 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
   };
 
   useEffect(() => {
-    const node = coachConversationScrollRef.current;
-    if (!node) return;
-    node.scrollTop = node.scrollHeight;
-  }, [coachSubtitleMessages.length, coachInterimText]);
+    const frame = window.requestAnimationFrame(() => {
+      const node = coachConversationScrollRef.current;
+      if (!node) return;
+      node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [coachLatestSubtitleScrollKey, coachInterimText]);
 
   const aiCoachPanel =
     resolvedTaskMode === "shadow" || resolvedTaskMode === "speaking" || resolvedTaskMode === "intensive" ? (
@@ -4853,6 +4869,7 @@ const StoryflowTaskPlayer: React.FC<StoryflowTaskPlayerProps> = ({
       intensiveAutoAdvanceTimerRef.current = null;
     }
     intensiveAutoAdvanceKeyRef.current = "";
+    intensiveStudentAnsweredRef.current = false;
   }, [resolvedTaskMode, safeIndex]);
 
   useEffect(() => {

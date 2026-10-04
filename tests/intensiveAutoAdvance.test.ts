@@ -1,34 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  INTENSIVE_AUTO_ADVANCE_CUE,
-  shouldAutoAdvanceIntensivePage,
-} from "../lib/intensiveAutoAdvance";
+import { shouldAutoAdvanceIntensivePage } from "../lib/intensiveAutoAdvance";
 
-test("advances only after Mia finishes an intensive page", () => {
+test("advances after Mia finishes feedback to a student answer without a spoken cue", () => {
+  const completedFeedback = {
+    mode: "intensive",
+    role: "coach" as const,
+    definite: true,
+    text: "回答得很准确，你发现了 Kipper 脸上的红疹。",
+    canNext: true,
+    studentAnswered: true,
+  };
+
   assert.equal(
-    shouldAutoAdvanceIntensivePage({
-      mode: "intensive",
-      role: "coach",
-      definite: true,
-      text: `回答得很准确。${INTENSIVE_AUTO_ADVANCE_CUE}`,
-      canNext: true,
-    }),
+    shouldAutoAdvanceIntensivePage(completedFeedback),
     true
   );
 });
 
-test("accepts harmless punctuation and spacing changes in the completion cue", () => {
+test("does not advance before the student has answered the page question", () => {
+  const openingLecture = {
+    mode: "intensive",
+    role: "coach" as const,
+    definite: true,
+    text: "一天早晨，Kipper 发现脸上出现了红红的小点。What happened to Kipper?",
+    canNext: true,
+    studentAnswered: false,
+  };
+
   assert.equal(
-    shouldAutoAdvanceIntensivePage({
-      mode: "intensive",
-      role: "coach",
-      definite: true,
-      text: "回答正确。这一页讲完了, 我们自动进入下一页",
-      canNext: true,
-    }),
-    true
+    shouldAutoAdvanceIntensivePage(openingLecture),
+    false
   );
 });
 
@@ -37,8 +40,9 @@ test("does not advance for partial subtitles, student speech, or another task mo
     mode: "intensive",
     role: "coach" as const,
     definite: true,
-    text: INTENSIVE_AUTO_ADVANCE_CUE,
+    text: "回答得很准确。",
     canNext: true,
+    studentAnswered: true,
   };
 
   assert.equal(shouldAutoAdvanceIntensivePage({ ...base, definite: false }), false);
@@ -46,25 +50,19 @@ test("does not advance for partial subtitles, student speech, or another task mo
   assert.equal(shouldAutoAdvanceIntensivePage({ ...base, mode: "speaking" }), false);
 });
 
-test("does not advance from ordinary next-page wording or beyond the last page", () => {
+test("does not advance beyond the last page", () => {
   const base = {
     mode: "intensive",
     role: "coach" as const,
     definite: true,
+    text: "回答得很准确。",
     canNext: true,
+    studentAnswered: true,
   };
 
   assert.equal(
     shouldAutoAdvanceIntensivePage({
       ...base,
-      text: "回答完这个问题，我们再看下一页。",
-    }),
-    false
-  );
-  assert.equal(
-    shouldAutoAdvanceIntensivePage({
-      ...base,
-      text: INTENSIVE_AUTO_ADVANCE_CUE,
       canNext: false,
     }),
     false

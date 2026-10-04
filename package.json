@@ -9,7 +9,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint .",
-    "test:intensive-auto-advance": "sh -c 'test_out=$(mktemp -d) && tsc --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck --outDir \"$test_out\" tests/intensiveAutoAdvance.test.ts lib/intensiveAutoAdvance.ts && node --test \"$test_out/tests/intensiveAutoAdvance.test.js\"'"
+    "test:intensive-auto-advance": "sh -c 'test_out=$(mktemp -d) && tsc --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck --outDir \"$test_out\" tests/intensiveAutoAdvance.test.ts lib/intensiveAutoAdvance.ts && node --test \"$test_out/tests/intensiveAutoAdvance.test.js\" && node scripts/check-intensive-storytelling-ui.mjs'"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",
